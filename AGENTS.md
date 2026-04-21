@@ -60,7 +60,7 @@ tmux-shunpo currently reimplements session creation, directory discovery, and fu
 ## 3. Architecture After Revamp
 
 ```
-tmux-shunpo.sh (~600 lines, down from 1674)
+tmux-shunpo (~600 lines, down from 1674)
 ├── Core utilities (notify, error_exit, validate_range, command_exists)
 ├── Config (TOML via yq -p toml)
 ├── Marks management (parse, add, remove, rearrange, jump, editor)
@@ -453,7 +453,7 @@ File: `~/.local/share/tmux-shunpo/tools/<session-name>`
 
 11. **Set up bats test infrastructure** — see Section 17
 12. **Write tests for every function** — each phase's code must have tests before moving on
-13. **ShellCheck must pass clean** — `shellcheck -x -o all -s bash tmux-shunpo.sh` with zero warnings
+13. **ShellCheck must pass clean** — `shellcheck -x -o all -s bash tmux-shunpo` with zero warnings
 
 ### Phase 5: Polish
 
@@ -644,7 +644,7 @@ config_load_tool_templates() {
 - `--` before user-supplied arguments: `grep -F -- "$input" "$file"`
 - Errors to stderr: `echo "error" >&2`
 - Temp files via `mktemp`, cleanup via `trap EXIT`
-- Must pass: `shellcheck -x -o all -s bash tmux-shunpo.sh`
+- Must pass: `shellcheck -x -o all -s bash tmux-shunpo`
 
 ### Portability (macOS primary, Linux secondary)
 
@@ -1017,27 +1017,27 @@ No test suite exists yet. Not required for this revamp. Focus on manual testing:
 
 ```bash
 # Test marks
-./tmux-shunpo.sh --add              # stores current session name
-./tmux-shunpo.sh --goto 1           # sesh connect to marked session
-./tmux-shunpo.sh --marks            # gum-based mark editor in tmux popup
+./tmux-shunpo --add              # stores current session name
+./tmux-shunpo --goto 1           # sesh connect to marked session
+./tmux-shunpo --marks            # gum-based mark editor in tmux popup
 
 # Test tools
-./tmux-shunpo.sh --tools            # gum-based tool editor in tmux popup
-./tmux-shunpo.sh --goto @1          # navigate to tool window
+./tmux-shunpo --tools            # gum-based tool editor in tmux popup
+./tmux-shunpo --goto @1          # navigate to tool window
 
 # Test @template resolution
 # Set tool to "@editor", verify it reads sesh.toml [[window]] name="editor"
 
 # Test search
-./tmux-shunpo.sh --search           # should show sesh list in fzf
+./tmux-shunpo --search           # should show sesh list in fzf
 
 # Test from keybinding (no TTY)
-tmux run-shell "path/to/tmux-shunpo.sh --goto 1"
-tmux run-shell "path/to/tmux-shunpo.sh --goto @2"
+tmux run-shell "path/to/tmux-shunpo --goto 1"
+tmux run-shell "path/to/tmux-shunpo --goto @2"
 
 # Test gum editors in tmux popup
-tmux display-popup -E -w 80% -h 70% "path/to/tmux-shunpo.sh --marks"
-tmux display-popup -E -w 80% -h 70% "path/to/tmux-shunpo.sh --tools"
+tmux display-popup -E -w 80% -h 70% "path/to/tmux-shunpo --marks"
+tmux display-popup -E -w 80% -h 70% "path/to/tmux-shunpo --tools"
 ```
 
 ---
@@ -1048,7 +1048,7 @@ After revamp is complete:
 
 ```
 tmux-shunpo/
-├── tmux-shunpo.sh          # Main script (revamped, ~500-600 lines)
+├── tmux-shunpo          # Main script (revamped, ~500-600 lines)
 ├── config.toml.example     # NEW — example TOML config (UI settings only)
 ├── LICENSE                  # Unchanged
 └── .gitignore              # Unchanged
@@ -1105,24 +1105,24 @@ interactive input (`--search`, `--marks`, `--tools`) auto-wrap in
 
 ```tmux
 # Session navigation
-bind-key "T" run-shell "tmux-shunpo.sh --search"       # fuzzy picker
+bind-key "T" run-shell "tmux-shunpo --search"       # fuzzy picker
 bind-key "L" run-shell "sesh last"                      # last session
 
 # Marks (Alt+number for instant jump)
-bind-key -n M-1 run-shell "tmux-shunpo.sh --goto 1"
-bind-key -n M-2 run-shell "tmux-shunpo.sh --goto 2"
-bind-key -n M-3 run-shell "tmux-shunpo.sh --goto 3"
-bind-key -n M-4 run-shell "tmux-shunpo.sh --goto 4"
-bind-key -n M-5 run-shell "tmux-shunpo.sh --goto 5"
-bind-key "m"   run-shell "tmux-shunpo.sh --marks"       # mark editor
-bind-key "M"   run-shell "tmux-shunpo.sh --add"         # quick mark
+bind-key -n M-1 run-shell "tmux-shunpo --goto 1"
+bind-key -n M-2 run-shell "tmux-shunpo --goto 2"
+bind-key -n M-3 run-shell "tmux-shunpo --goto 3"
+bind-key -n M-4 run-shell "tmux-shunpo --goto 4"
+bind-key -n M-5 run-shell "tmux-shunpo --goto 5"
+bind-key "m"   run-shell "tmux-shunpo --marks"       # mark editor
+bind-key "M"   run-shell "tmux-shunpo --add"         # quick mark
 
 # Tools (prefix + key for per-session windows)
-bind-key "u" run-shell "tmux-shunpo.sh --goto @1"       # tool 1 (e.g. editor)
-bind-key "i" run-shell "tmux-shunpo.sh --goto @2"       # tool 2 (e.g. server)
-bind-key "o" run-shell "tmux-shunpo.sh --goto @3"       # tool 3
-bind-key "p" run-shell "tmux-shunpo.sh --goto @4"       # tool 4
-bind-key "E" run-shell "tmux-shunpo.sh --tools"         # tool editor
+bind-key "u" run-shell "tmux-shunpo --goto @1"       # tool 1 (e.g. editor)
+bind-key "i" run-shell "tmux-shunpo --goto @2"       # tool 2 (e.g. server)
+bind-key "o" run-shell "tmux-shunpo --goto @3"       # tool 3
+bind-key "p" run-shell "tmux-shunpo --goto @4"       # tool 4
+bind-key "E" run-shell "tmux-shunpo --tools"         # tool editor
 ```
 
 ---
@@ -1199,15 +1199,15 @@ Old inline commands (`1: nvim .`) still work. No migration needed.
 ```bash
 # Old marks file with paths should still work
 echo '1: ~/Code/aggen' > ~/.local/share/tmux-shunpo/marks
-tmux-shunpo.sh --goto 1  # should sesh connect ~/Code/aggen
+tmux-shunpo --goto 1  # should sesh connect ~/Code/aggen
 
 # Old tools file with inline commands should still work
 echo '1: nvim .' > ~/.local/share/tmux-shunpo/tools/test-session
-tmux-shunpo.sh --goto @1  # should open nvim in tool window
+tmux-shunpo --goto @1  # should open nvim in tool window
 
 # Deprecated config.conf should show warning
 touch ~/.config/tmux-shunpo/config.conf
-tmux-shunpo.sh --help  # should warn about config.conf deprecation
+tmux-shunpo --help  # should warn about config.conf deprecation
 ```
 
 ---
@@ -1217,7 +1217,7 @@ tmux-shunpo.sh --help  # should warn about config.conf deprecation
 Enable trace output with `DEBUG` environment variable:
 
 ```bash
-DEBUG=1 tmux-shunpo.sh --goto 1
+DEBUG=1 tmux-shunpo --goto 1
 ```
 
 **Implementation** (at top of script, after `set -euo pipefail`):
@@ -1234,7 +1234,7 @@ Useful for diagnosing keybinding issues (redirect stderr to file):
 
 ```bash
 # Debug from keybinding
-bind-key "d" run-shell "DEBUG=1 tmux-shunpo.sh --goto 1 2>/tmp/shunpo-debug.log"
+bind-key "d" run-shell "DEBUG=1 tmux-shunpo --goto 1 2>/tmp/shunpo-debug.log"
 ```
 
 ---
@@ -1623,7 +1623,7 @@ tests must never call real external tools.
 All bash code MUST pass ShellCheck with zero warnings:
 
 ```bash
-shellcheck -x -o all -s bash tmux-shunpo.sh
+shellcheck -x -o all -s bash tmux-shunpo
 ```
 
 Per-line disables allowed ONLY with a comment explaining why. Run shellcheck
@@ -2076,7 +2076,7 @@ bats tests/test_marks.bats
 bats tests/test_validate.bats --filter "rejects semicolon"
 
 # ShellCheck (run separately, must pass clean)
-shellcheck -x -o all -s bash tmux-shunpo.sh
+shellcheck -x -o all -s bash tmux-shunpo
 ```
 
 ### 17g. Test Fixtures
@@ -2178,5 +2178,5 @@ Before any work item is considered complete:
 - [ ] No `eval`, `bash -c "$var"`, or `source` on external files
 - [ ] `--` used before user-supplied arguments to commands
 - [ ] Errors go to stderr, data to stdout
-- [ ] `shellcheck -x -o all -s bash tmux-shunpo.sh` passes with **zero warnings**
+- [ ] `shellcheck -x -o all -s bash tmux-shunpo` passes with **zero warnings**
 - [ ] Temp files use `mktemp` and are cleaned up via `trap EXIT`

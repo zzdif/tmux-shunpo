@@ -5,7 +5,7 @@
 # SC2064: Trap variables expand at definition time (correct for temp files).
 
 # =============================================================================
-# tmux-shunpo.sh — Harpoon2-style tmux navigation (v0.1.0)
+# tmux-shunpo — Harpoon2-style tmux navigation (v0.1.0)
 # =============================================================================
 # Fast session marks (1-9) and per-session tools (@1-@9).
 # Delegates session management to sesh. Uses gum for interactive editors.
@@ -270,17 +270,19 @@ parse_marks() {
         if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
             local slot="${BASH_REMATCH[1]}"
             local path="${BASH_REMATCH[2]}"
+            # Trim leading/trailing whitespace
             path="${path#"${path%%[![:space:]]*}"}"
             path="${path%"${path##*[![:space:]]}"}"
             [[ -z "${path}" ]] && continue
             [[ "${slot}" -lt 1 || "${slot}" -gt 9 ]] && continue
+
             if [[ -n "${target_slot}" ]]; then
                 if [[ "${slot}" == "${target_slot}" ]]; then
-                    echo "${path}"
+                    printf '%s\n' "${path}"
                     return 0
                 fi
             else
-                echo "${slot}:${path}"
+                printf '%s:%s\n' "${slot}" "${path}"
                 found=true
             fi
         fi
@@ -299,14 +301,10 @@ mark_set() {
     local -A marks
     local line
     while IFS= read -r line; do
-        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
-        if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
-            local s="${BASH_REMATCH[1]}"
-            local p="${BASH_REMATCH[2]}"
-            p="${p#"${p%%[![:space:]]*}"}"
-            p="${p%"${p##*[![:space:]]}"}"
-            [[ -n "${p}" ]] && marks[${s}]="${p}"
-        fi
+        [[ -z "${line}" ]] && continue
+        local s="${line%%:*}"
+        local p="${line#*:}"
+        marks[${s}]="${p}"
     done < <(parse_marks 2>/dev/null || true)
 
     marks[${slot}]="${session_ref}"
@@ -785,6 +783,13 @@ navigate_to_tool() {
         command="$(tmux show-option -gv default-shell)"
     fi
 
+    # Security: validate final command before execution
+    if [[ ! "${command}" =~ ^@ ]]; then
+        if ! validate_command "${command}" 2>/dev/null; then
+            error_exit "Security: invalid command for tool @${slot}: ${command}"
+        fi
+    fi
+
     local is_shell_only=false
     case "${command}" in
         bash|zsh|sh|fish|ksh|tcsh) is_shell_only=true ;;
@@ -853,8 +858,20 @@ navigate_to_tool() {
 # SEARCH (sesh + fzf)
 # =============================================================================
 
+get_finder() {
+    if command_exists fzf; then
+        echo "fzf"
+    elif command_exists sk; then
+        echo "sk"
+    else
+        return 1
+    fi
+}
+
 search_and_connect() {
     local selected
+    local finder
+    finder=$(get_finder) || error_exit "fzf or sk not found"
 
     if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
         local temp_file
@@ -864,9 +881,13 @@ search_and_connect() {
         }
         trap 'rm -f "'"${temp_file}"'"' EXIT INT TERM
 
+        local border_label_flag=""
+        [[ "${finder}" == "fzf" ]] && border_label_flag="--border-label ' shunpo → sesh '"
+
         set +e
-        tmux popup -E -w 90% -h 80% "sesh list --icons | fzf --ansi --no-sort \
-            --border-label ' shunpo → sesh ' \
+        tmux popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
+            "sesh list --icons | ${finder} --ansi --no-sort \
+            ${border_label_flag} \
             --prompt '⚡ ' \
             --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill' \
             --bind 'tab:down,btab:up' \
@@ -886,7 +907,7 @@ search_and_connect() {
         rm -f "${temp_file}"
     else
         set +e
-        selected=$(sesh list --icons | fzf --ansi --no-sort \
+        selected=$(sesh list --icons | "${finder}" --ansi --no-sort \
             --height "${CFG_FINDER_HEIGHT_PERCENT}%" \
             --layout reverse --border \
             --prompt '⚡ ' \
@@ -1233,7 +1254,7 @@ main() {
             ;;
     esac
 
-    cfg_load
+    cfg_load || exit 1
 
     case "${1:-}" in
         -h|--help)

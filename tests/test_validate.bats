@@ -4,7 +4,7 @@ setup() {
     load 'test_helper/common-setup'
     _common_setup
     TEST_TEMP_DIR="$(mktemp -d)"
-    source "${PROJECT_ROOT}/tmux-shunpo.sh"
+    source "${PROJECT_ROOT}/tmux-shunpo"
 }
 
 teardown() {

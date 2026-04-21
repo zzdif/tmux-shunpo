@@ -16,7 +16,7 @@ setup() {
     export SESH_CONFIG="${TEST_TEMP_DIR}/sesh.toml"
     mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${DATA_DIR}/tools"
 
-    source "${PROJECT_ROOT}/tmux-shunpo.sh"
+    source "${PROJECT_ROOT}/tmux-shunpo"
 }
 
 teardown() {
