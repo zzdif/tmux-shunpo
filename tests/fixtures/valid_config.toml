@@ -1,0 +1,11 @@
+tool_window_base = 88
+shell_init_delay = 0.2
+window_name_max_length = 20
+
+[ui]
+popup_width = "80%"
+popup_height = "70%"
+
+[finder]
+height_percent = 50
+preview_percent = 50

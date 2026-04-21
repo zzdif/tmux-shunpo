@@ -1,0 +1,1300 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash disable=SC2310,SC2249,SC2064
+# SC2310: Functions called in conditions for intentional error handling.
+# SC2249: Default case patterns omitted where all cases are explicitly handled.
+# SC2064: Trap variables expand at definition time (correct for temp files).
+
+# =============================================================================
+# tmux-shunpo.sh — Harpoon2-style tmux navigation (v0.1.0)
+# =============================================================================
+# Fast session marks (1-9) and per-session tools (@1-@9).
+# Delegates session management to sesh. Uses gum for interactive editors.
+#
+# DEPENDENCIES: bash>=4.0, tmux>=3.2, sesh, yq, gum, fzf|sk
+# =============================================================================
+
+VERSION="0.1.0"
+
+set -euo pipefail
+
+if [[ "${DEBUG:-}" == "1" ]]; then
+    export PS4='+[${BASH_SOURCE[0]##*/}:${LINENO}${FUNCNAME[0]:+:${FUNCNAME[0]}()}] '
+    set -x
+fi
+
+# =============================================================================
+# PATHS
+# =============================================================================
+
+CONFIG_DIR="${CONFIG_DIR:-${HOME}/.config/tmux-shunpo}"
+CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.toml}"
+DATA_DIR="${DATA_DIR:-${HOME}/.local/share/tmux-shunpo}"
+MARKS_FILE="${MARKS_FILE:-${DATA_DIR}/marks}"
+SESH_CONFIG="${SESH_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/sesh/sesh.toml}"
+
+mkdir -p "${CONFIG_DIR}" || { echo "Error: cannot create config directory" >&2; exit 1; }
+mkdir -p "${DATA_DIR}" || { echo "Error: cannot create data directory" >&2; exit 1; }
+
+# =============================================================================
+# CONFIGURATION (populated by cfg_load)
+# =============================================================================
+
+CFG_TOOL_WINDOW_BASE=88
+CFG_SHELL_INIT_DELAY=0.2
+CFG_WINDOW_NAME_MAX_LENGTH=20
+CFG_POPUP_WIDTH="80%"
+CFG_POPUP_HEIGHT="70%"
+CFG_FINDER_HEIGHT_PERCENT=50
+CFG_FINDER_PREVIEW_PERCENT=50  # used by search_and_connect
+
+# =============================================================================
+# CORE UTILITIES
+# =============================================================================
+
+notify() {
+    local message="$1"
+    local is_error="${2:-}"
+    if [[ -t 0 ]]; then
+        if [[ "${is_error}" == "error" ]]; then
+            echo "${message}" >&2
+        else
+            echo "${message}"
+        fi
+    else
+        tmux display-message "${message}"
+    fi
+}
+
+error_exit() {
+    local message="$1"
+    local exit_code="${2:-1}"
+    notify "${message}" "error"
+    exit "${exit_code}"
+}
+
+validate_range() {
+    local value="$1"
+    local min="$2"
+    local max="$3"
+    local error_msg="$4"
+    if [[ ! "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -lt "${min}" ]] || [[ "${value}" -gt "${max}" ]]; then
+        error_exit "${error_msg}"
+    fi
+}
+
+command_exists() {
+    command -v "$1" &> /dev/null
+}
+
+atomic_write() {
+    local file_path="$1"
+    local content="$2"
+    local temp_file="${file_path}.tmp.$$"
+    mkdir -p "$(dirname "${file_path}")" || error_exit "Cannot create directory for: ${file_path}"
+    printf '%s\n' "${content}" > "${temp_file}" || error_exit "Cannot write to temp file: ${temp_file}"
+    mv -- "${temp_file}" "${file_path}" || { rm -f "${temp_file}"; error_exit "Cannot move temp file to: ${file_path}"; }
+}
+
+# =============================================================================
+# DEPENDENCY CHECKS
+# =============================================================================
+
+check_dependencies() {
+    local missing=()
+    command_exists bash || missing+=("bash>=4.0")
+    command_exists tmux || missing+=("tmux>=3.2")
+    command_exists sesh || missing+=("sesh")
+    command_exists yq || missing+=("yq (Go version)")
+
+    if ! command_exists fzf && ! command_exists sk; then
+        missing+=("fzf or sk")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        error_exit "missing required tools: ${missing[*]}"
+    fi
+}
+
+check_gum() {
+    if ! command_exists gum; then
+        error_exit "gum is required for this command. Install charmbracelet/gum"
+    fi
+}
+
+# =============================================================================
+# CONFIG LOADING
+# =============================================================================
+
+cfg_check_file_safety() {
+    local filepath="$1"
+    [[ ! -f "${filepath}" ]] && return 0
+
+    local file_owner
+    if stat -f '%u' "${filepath}" &> /dev/null; then
+        file_owner=$(stat -f '%u' "${filepath}")
+    else
+        file_owner=$(stat -c '%u' "${filepath}")
+    fi
+
+    local current_uid
+    current_uid=$(id -u)
+    if [[ "${file_owner}" != "${current_uid}" ]]; then
+        echo "error: config file owned by another user: ${filepath}" >&2
+        return 1
+    fi
+
+    local file_perms
+    if stat -f '%Lp' "${filepath}" &> /dev/null; then
+        file_perms=$(stat -f '%Lp' "${filepath}")
+    else
+        file_perms=$(stat -c '%a' "${filepath}")
+    fi
+
+    local world_bit="${file_perms:2:1}"
+    if [[ "${world_bit}" =~ [2367] ]]; then
+        echo "error: config file is world-writable: ${filepath} (mode ${file_perms})" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+cfg_load() {
+    CFG_TOOL_WINDOW_BASE=88
+    CFG_SHELL_INIT_DELAY=0.2
+    CFG_WINDOW_NAME_MAX_LENGTH=20
+    CFG_POPUP_WIDTH="80%"
+    CFG_POPUP_HEIGHT="70%"
+    CFG_FINDER_HEIGHT_PERCENT=50
+CFG_FINDER_PREVIEW_PERCENT=50  # used by search_and_connect
+
+    if ! cfg_check_file_safety "${CONFIG_FILE}"; then
+        return 1
+    fi
+    if ! cfg_check_file_safety "${SESH_CONFIG}"; then
+        return 1
+    fi
+
+    [[ ! -f "${CONFIG_FILE}" ]] && return 0
+
+    local val
+    val=$(yq -p toml '.tool_window_base // 88' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_TOOL_WINDOW_BASE="${val}"
+
+    val=$(yq -p toml '.shell_init_delay // 0.2' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_SHELL_INIT_DELAY="${val}"
+
+    val=$(yq -p toml '.window_name_max_length // 20' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_WINDOW_NAME_MAX_LENGTH="${val}"
+
+    val=$(yq -p toml '.ui.popup_width // "80%"' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_POPUP_WIDTH="${val}"
+
+    val=$(yq -p toml '.ui.popup_height // "70%"' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_POPUP_HEIGHT="${val}"
+
+    val=$(yq -p toml '.finder.height_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_FINDER_HEIGHT_PERCENT="${val}"
+
+    val=$(yq -p toml '.finder.preview_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_FINDER_PREVIEW_PERCENT="${val}"
+
+    # CFG_FINDER_PREVIEW_PERCENT is used in search_and_connect fzf preview window
+}
+
+# =============================================================================
+# SECURITY & VALIDATION
+# =============================================================================
+
+validate_command() {
+    local command="$1"
+    if [[ -z "${command// }" ]]; then
+        echo "error: command cannot be empty" >&2
+        return 1
+    fi
+    if [[ ! "${command}" =~ ^[a-zA-Z0-9\ +./_:@=~-]+$ ]]; then
+        echo "error: invalid characters in command" >&2
+        return 1
+    fi
+    if [[ "${command}" =~ \.\./\.\. ]]; then
+        echo "error: directory traversal not allowed" >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_session_name() {
+    local name="$1"
+    if [[ "${name}" =~ \.\./  ]] || [[ "${name}" =~ ^/ ]] || [[ "${name}" =~ \.\. ]]; then
+        return 1
+    fi
+    if [[ ! "${name}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+validate_template_name() {
+    local name="$1"
+    if [[ ! "${name}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "error: invalid template name: ${name}" >&2
+        return 1
+    fi
+    return 0
+}
+
+validate_mark_entry() {
+    local path="$1"
+    [[ -z "${path}" ]] && return 0
+    if [[ ! "${path}" =~ ^[a-zA-Z0-9._/~-]+$ ]]; then
+        echo "error: invalid characters in path: ${path}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# =============================================================================
+# MARKS MANAGEMENT
+# =============================================================================
+
+parse_marks() {
+    local target_slot="${1:-}"
+    if [[ ! -f "${MARKS_FILE}" ]]; then
+        [[ -n "${target_slot}" ]] && return 1
+        return 0
+    fi
+
+    local found=false
+    while IFS= read -r line; do
+        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+            local slot="${BASH_REMATCH[1]}"
+            local path="${BASH_REMATCH[2]}"
+            path="${path#"${path%%[![:space:]]*}"}"
+            path="${path%"${path##*[![:space:]]}"}"
+            [[ -z "${path}" ]] && continue
+            [[ "${slot}" -lt 1 || "${slot}" -gt 9 ]] && continue
+            if [[ -n "${target_slot}" ]]; then
+                if [[ "${slot}" == "${target_slot}" ]]; then
+                    echo "${path}"
+                    return 0
+                fi
+            else
+                echo "${slot}:${path}"
+                found=true
+            fi
+        fi
+    done < "${MARKS_FILE}"
+
+    [[ -n "${target_slot}" ]] && return 1
+    [[ "${found}" == true ]] && return 0 || return 1
+}
+
+mark_set() {
+    local slot="$1"
+    local session_ref="$2"
+    validate_range "${slot}" 1 9 "Slot must be between 1-9"
+    [[ -z "${session_ref// }" ]] && error_exit "Cannot set empty mark" 128
+
+    local -A marks
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+            local s="${BASH_REMATCH[1]}"
+            local p="${BASH_REMATCH[2]}"
+            p="${p#"${p%%[![:space:]]*}"}"
+            p="${p%"${p##*[![:space:]]}"}"
+            [[ -n "${p}" ]] && marks[${s}]="${p}"
+        fi
+    done < <(parse_marks 2>/dev/null || true)
+
+    marks[${slot}]="${session_ref}"
+
+    local content
+    content="# Marks for tmux-shunpo
+# Format: SLOT: PATH or SESSION"
+    local i
+    for i in $(seq 1 9); do
+        if [[ -n "${marks[${i}]:-}" ]]; then
+            content="${content}
+${i}: ${marks[${i}]}"
+        fi
+    done
+
+    atomic_write "${MARKS_FILE}" "${content}"
+}
+
+mark_add() {
+    local session_ref
+    if [[ -n "${TMUX:-}" ]]; then
+        session_ref=$(tmux display-message -p '#S' 2>/dev/null) || {
+            notify "Cannot determine current session" "error"
+            return 1
+        }
+    else
+        session_ref="${PWD}"
+    fi
+
+    local -A marks_by_value
+    local -A marks_by_slot
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        local s="${line%%:*}"
+        local p="${line#*:}"
+        marks_by_value[${p}]="${s}"
+        marks_by_slot[${s}]="${p}"
+    done < <(parse_marks 2>/dev/null || true)
+
+    if [[ -n "${marks_by_value[${session_ref}]:-}" ]]; then
+        local existing_slot="${marks_by_value[${session_ref}]}"
+        if [[ -t 0 ]]; then
+            echo "Already marked in slot ${existing_slot}: ${session_ref}"
+            return 1
+        else
+            notify "Already marked in slot ${existing_slot}"
+            return 0
+        fi
+    fi
+
+    local next_slot=1
+    while [[ -n "${marks_by_slot[${next_slot}]:-}" && ${next_slot} -le 9 ]]; do
+        next_slot=$((next_slot + 1))
+    done
+
+    if [[ ${next_slot} -gt 9 ]]; then
+        notify "Error: all mark slots (1-9) are full" "error"
+        return 1
+    fi
+
+    mark_set "${next_slot}" "${session_ref}"
+
+    if [[ -t 0 ]]; then
+        echo "Added mark ${next_slot}: ${session_ref}"
+    else
+        notify "Added mark ${next_slot}"
+    fi
+}
+
+mark_remove() {
+    local target="$1"
+    if [[ -z "${target}" ]]; then
+        echo "Error: no target specified for remove" >&2
+        return 1
+    fi
+
+    if [[ "${target}" == "all" ]]; then
+        atomic_write "${MARKS_FILE}" "# Marks for tmux-shunpo"
+        notify "Removed all marks"
+        return 0
+    fi
+
+    if [[ ! "${target}" =~ ^[0-9]+$ ]]; then
+        echo "Error: mark slot must be a number or 'all'" >&2
+        return 1
+    fi
+
+    local path
+    if ! path=$(parse_marks "${target}" 2>/dev/null); then
+        echo "Error: mark slot ${target} does not exist" >&2
+        return 1
+    fi
+
+    local -A marks
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        local s="${line%%:*}"
+        local p="${line#*:}"
+        marks[${s}]="${p}"
+    done < <(parse_marks 2>/dev/null || true)
+
+    unset "marks[${target}]"
+
+    local content="# Marks for tmux-shunpo"
+    local i
+    for i in $(seq 1 9); do
+        if [[ -n "${marks[${i}]:-}" ]]; then
+            content="${content}
+${i}: ${marks[${i}]}"
+        fi
+    done
+
+    atomic_write "${MARKS_FILE}" "${content}"
+    mark_rearrange
+    notify "Removed mark ${target}: ${path}"
+}
+
+mark_rearrange() {
+    if [[ ! -f "${MARKS_FILE}" ]]; then
+        return 0
+    fi
+
+    local paths=()
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        local p="${line#*:}"
+        paths+=("${p}")
+    done < <(parse_marks 2>/dev/null || true)
+
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    local content="# Marks for tmux-shunpo"
+    local new_slot=1
+    local path
+    for path in "${paths[@]}"; do
+        content="${content}
+${new_slot}: ${path}"
+        new_slot=$((new_slot + 1))
+    done
+
+    atomic_write "${MARKS_FILE}" "${content}"
+}
+
+mark_remove_invalid() {
+    local slot="$1"
+    local invalid_path="$2"
+    local content="# Marks for tmux-shunpo"
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+            local s="${BASH_REMATCH[1]}"
+            local p="${BASH_REMATCH[2]}"
+            p="${p#"${p%%[![:space:]]*}"}"
+            p="${p%"${p##*[![:space:]]}"}"
+            if [[ "${s}" != "${slot}" || "${p}" != "${invalid_path}" ]]; then
+                content="${content}
+${s}: ${p}"
+            fi
+        fi
+    done < "${MARKS_FILE}"
+    atomic_write "${MARKS_FILE}" "${content}"
+    mark_rearrange
+}
+
+mark_jump_to() {
+    local target="$1"
+    local session_ref=""
+
+    if [[ -z "${target}" ]]; then
+        [[ -t 0 ]] && echo "Error: no target specified for goto" >&2
+        exit 1
+    fi
+
+    if [[ "${target}" =~ ^[0-9]+$ ]]; then
+        if session_ref=$(parse_marks "${target}"); then
+            if [[ "${session_ref}" == /* || "${session_ref}" == ~* ]] && [[ ! -d "${session_ref}" ]]; then
+                # session_ref is a path that no longer exists
+                mark_remove_invalid "${target}" "${session_ref}" 2>/dev/null || true
+                notify "Mark ${target} path no longer exists" "error"
+                return 1
+            fi
+            if ! sesh connect "${session_ref}"; then
+                notify "Failed to connect to session: ${session_ref}" "error"
+                return 1
+            fi
+            return 0
+        fi
+    fi
+
+    notify "Mark '${target}' not found"
+    return 1
+}
+
+# =============================================================================
+# TOOL TEMPLATES (from sesh.toml)
+# =============================================================================
+
+config_load_tool_templates() {
+    if [[ ! -f "${SESH_CONFIG}" ]]; then
+        return 0
+    fi
+    local out
+    out=$(yq -p toml '.window[] | [.name, .startup_script // ""] | @tsv' "${SESH_CONFIG}" 2>/dev/null) || true
+    [[ -z "${out}" ]] && return 0
+    printf '%s\n' "${out}" | while IFS=$'\t' read -r name command; do
+        [[ -n "${name}" && -n "${command}" ]] && echo "${name}:::${command}"
+    done
+}
+
+sesh_resolve_window_template() {
+    local template_name="$1"
+    if [[ ! -f "${SESH_CONFIG}" ]]; then
+        return 1
+    fi
+    yq -p toml ".window[] | select(.name == \"${template_name}\") | .startup_script // \"\"" "${SESH_CONFIG}" 2>/dev/null
+}
+
+# =============================================================================
+# TOOLS MANAGEMENT
+# =============================================================================
+
+tool_auto_populate() {
+    local session_name="$1"
+    local tools_file="${DATA_DIR}/tools/${session_name}"
+
+    if [[ -f "${tools_file}" ]]; then
+        return 0
+    fi
+    if [[ ! -f "${SESH_CONFIG}" ]]; then
+        return 0
+    fi
+
+    local windows_json
+    windows_json=$(yq -p toml -o json ".session[] | select(.name == \"${session_name}\") | .windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+
+    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
+        local session_path
+        session_path=$(yq -p toml ".session[] | select(.name == \"${session_name}\") | .path // \"\"" "${SESH_CONFIG}" 2>/dev/null) || true
+        if [[ -z "${session_path}" ]]; then
+            session_path=$(tmux display-message -p '#{session_path}' 2>/dev/null) || true
+        fi
+        session_path="${session_path/#\~/${HOME}}"
+
+        if [[ -n "${session_path}" ]]; then
+            local num_wildcards
+            num_wildcards=$(yq -p toml '.wildcard | length // 0' "${SESH_CONFIG}" 2>/dev/null) || num_wildcards=0
+            local i
+            for ((i = 0; i < num_wildcards; i++)); do
+                local pattern
+                pattern=$(yq -p toml ".wildcard[${i}].pattern // \"\"" "${SESH_CONFIG}" 2>/dev/null) || continue
+                pattern="${pattern/#\~/${HOME}}"
+                # shellcheck disable=SC2254
+                case "${session_path}" in
+                    ${pattern})
+                        windows_json=$(yq -p toml -o json ".wildcard[${i}].windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+                        break
+                        ;;
+                esac
+            done
+        fi
+    fi
+
+    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
+        windows_json=$(yq -p toml -o json '.default_session.windows // []' "${SESH_CONFIG}" 2>/dev/null) || true
+    fi
+
+    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "${tools_file}")"
+    {
+        echo "# auto-generated from sesh.toml"
+        local slot=1
+        local window_name
+        while IFS= read -r window_name; do
+            [[ -z "${window_name}" ]] && continue
+            [[ ${slot} -gt 9 ]] && break
+            echo "${slot}: @${window_name}"
+            slot=$((slot + 1))
+        done < <(printf '%s' "${windows_json}" | yq -o tsv '.[]' 2>/dev/null || true)
+    } > "${tools_file}"
+}
+
+get_tool() {
+    local session_name="$1"
+    local slot="$2"
+
+    validate_session_name "${session_name}" || error_exit "Invalid session name: ${session_name}"
+    validate_range "${slot}" 1 9 "Tool slot must be between 1-9"
+
+    local tools_dir="${DATA_DIR}/tools"
+    mkdir -p "${tools_dir}" 2>/dev/null || error_exit "Cannot create tools directory: ${tools_dir}"
+
+    local tools_file="${tools_dir}/${session_name}"
+
+    tool_auto_populate "${session_name}"
+
+    if [[ ! -f "${tools_file}" ]]; then
+        return 1
+    fi
+
+    local found=false
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ ^${slot}:[[:space:]]*(.+)$ ]]; then
+            local command="${BASH_REMATCH[1]}"
+            command="${command#"${command%%[![:space:]]*}"}"
+            command="${command%"${command##*[![:space:]]}"}"
+            if [[ -n "${command}" ]]; then
+                local window_name
+                window_name=$(generate_window_name "${command}")
+                echo "${window_name}:::${command}"
+                found=true
+            fi
+            break
+        fi
+    done < "${tools_file}"
+
+    [[ "${found}" == true ]] && return 0 || return 1
+}
+
+tool_set() {
+    local session_name="$1"
+    local slot="$2"
+    local command="$3"
+
+    validate_session_name "${session_name}" || error_exit "Invalid session name: ${session_name}"
+    validate_range "${slot}" 1 9 "Slot must be between 1-9"
+
+    local tools_file="${DATA_DIR}/tools/${session_name}"
+    mkdir -p "$(dirname "${tools_file}")" || error_exit "Cannot create tools directory"
+
+    local -A tools
+    local line
+    if [[ -f "${tools_file}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+            if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+                local s="${BASH_REMATCH[1]}"
+                local c="${BASH_REMATCH[2]}"
+                c="${c#"${c%%[![:space:]]*}"}"
+                c="${c%"${c##*[![:space:]]}"}"
+                [[ -n "${c}" ]] && tools[${s}]="${c}"
+            fi
+        done < "${tools_file}"
+    fi
+
+    tools[${slot}]="${command}"
+
+    local content="# Tools for session: ${session_name}"
+    local i
+    for i in $(seq 1 9); do
+        if [[ -n "${tools[${i}]:-}" ]]; then
+            content="${content}
+${i}: ${tools[${i}]}"
+        fi
+    done
+
+    atomic_write "${tools_file}" "${content}"
+}
+
+tool_remove() {
+    local session_name="$1"
+    local slot="$2"
+
+    validate_session_name "${session_name}" || error_exit "Invalid session name: ${session_name}"
+    validate_range "${slot}" 1 9 "Slot must be between 1-9"
+
+    local tools_file="${DATA_DIR}/tools/${session_name}"
+    [[ ! -f "${tools_file}" ]] && return 0
+
+    local -A tools
+    local line
+    while IFS= read -r line; do
+        [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
+        if [[ "${line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+            local s="${BASH_REMATCH[1]}"
+            local c="${BASH_REMATCH[2]}"
+            c="${c#"${c%%[![:space:]]*}"}"
+            c="${c%"${c##*[![:space:]]}"}"
+            [[ -n "${c}" ]] && tools[${s}]="${c}"
+        fi
+    done < "${tools_file}"
+
+    unset "tools[${slot}]"
+
+    local content="# Tools for session: ${session_name}"
+    local i
+    for i in $(seq 1 9); do
+        if [[ -n "${tools[${i}]:-}" ]]; then
+            content="${content}
+${i}: ${tools[${i}]}"
+        fi
+    done
+
+    atomic_write "${tools_file}" "${content}"
+}
+
+generate_window_name() {
+    local command="$1"
+    local custom_name="${2:-}"
+
+    if [[ -n "${custom_name}" ]]; then
+        local sanitized
+        sanitized=$(printf '%s' "${custom_name}" | tr ' /:' '-' | tr -d '()[]{}|&;')
+        printf '%s\n' "${sanitized}"
+        return 0
+    fi
+
+    local first_word="${command%% *}"
+    if [[ "${first_word}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+        local tmpl="${BASH_REMATCH[1]}"
+        local resolved
+        resolved=$(sesh_resolve_window_template "${tmpl}" 2>/dev/null) || true
+        if [[ -n "${resolved}" ]]; then
+            first_word="${resolved%% *}"
+        else
+            first_word="${tmpl}"
+        fi
+    fi
+
+    local window_name
+    window_name=$(printf '%s' "${first_word}" | sed 's/[^a-zA-Z0-9_-]//g')
+    if [[ -z "${window_name}" ]]; then
+        echo "window"
+    else
+        printf '%s\n' "${window_name:0:${CFG_WINDOW_NAME_MAX_LENGTH}}"
+    fi
+}
+
+navigate_to_tool() {
+    local slot="$1"
+    validate_range "${slot}" 1 9 "Invalid slot '${slot}'. Use 1-9"
+
+    local session_info
+    session_info=$(tmux display-message -p '#S #{session_path}' 2>/dev/null) || error_exit "Not in a tmux session"
+
+    local session_name session_path
+    read -r session_name session_path <<< "${session_info}"
+
+    local window_index=$((CFG_TOOL_WINDOW_BASE + slot - 1))
+
+    local tool_data
+    if ! tool_data=$(get_tool "${session_name}" "${slot}"); then
+        local error_msg="No tool set for slot ${slot} in session '${session_name}'"
+        if [[ -t 0 ]]; then
+            error_exit "${error_msg}. Use --tools to edit tools for this session"
+        else
+            notify "Tool @${slot} not configured (use --tools to edit tools)"
+            return 0
+        fi
+    fi
+
+    local name="${tool_data%%:::*}"
+    local command="${tool_data#*:::}"
+
+    # Expand @template to real command for execution
+    if [[ "${command}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+        local tmpl="${BASH_REMATCH[1]}"
+        local resolved
+        resolved=$(sesh_resolve_window_template "${tmpl}" 2>/dev/null) || true
+        if [[ -n "${resolved}" ]]; then
+            command="${resolved}"
+        elif [[ "${tmpl}" == "shell" ]]; then
+            command="$(tmux show-option -gv default-shell)"
+        fi
+    elif [[ "${command}" == "@shell" ]]; then
+        command="$(tmux show-option -gv default-shell)"
+    fi
+
+    local is_shell_only=false
+    case "${command}" in
+        bash|zsh|sh|fish|ksh|tcsh) is_shell_only=true ;;
+    esac
+
+    local window_info
+    window_info=$(tmux list-windows -F "#{window_index} #{window_panes}" 2>/dev/null | grep "^${window_index} " || true)
+
+    local window_exists=false
+    local has_panes=false
+
+    if [[ -n "${window_info}" ]]; then
+        window_exists=true
+        local pane_count
+        pane_count=$(echo "${window_info}" | cut -d' ' -f2)
+        [[ "${pane_count}" -gt 0 ]] && has_panes=true
+    fi
+
+    if [[ "${window_exists}" == true && "${has_panes}" == true ]]; then
+        local pane_info
+        pane_info=$(tmux display-message -p -t ":${window_index}.0" "#{pane_current_command} #{pane_pid}" 2>/dev/null || true)
+
+        local current_cmd pane_pid
+        read -r current_cmd pane_pid <<< "${pane_info}"
+
+        local is_idle=false
+        case "${current_cmd}" in
+            bash|zsh|sh|fish)
+                if [[ -n "${pane_pid}" ]]; then
+                    set +e
+                    local child_count
+                    child_count=$(pgrep -P "${pane_pid}" 2>/dev/null | wc -l | tr -d ' ')
+                    set -e
+                    [[ "${child_count}" -eq 0 ]] && is_idle=true
+                fi
+                ;;
+        esac
+
+        if [[ "${is_idle}" == true && "${is_shell_only}" == false ]]; then
+            local escaped_cmd
+            escaped_cmd=$(printf '%q' "${command}")
+            tmux send-keys -t ":${window_index}" -l -- "${escaped_cmd}"
+            tmux send-keys -t ":${window_index}" C-m
+        fi
+
+        tmux select-window -t ":${window_index}"
+    else
+        [[ "${window_exists}" == true ]] && tmux kill-window -t ":${window_index}" 2>/dev/null || true
+
+        tmux new-window -t ":${window_index}" -n "⚡${name}" -c "${session_path}"
+
+        sleep "${CFG_SHELL_INIT_DELAY}"
+
+        if [[ "${is_shell_only}" == false ]]; then
+            local escaped_cmd
+            escaped_cmd=$(printf '%q' "${command}")
+            tmux send-keys -t ":${window_index}" -l -- "${escaped_cmd}"
+            tmux send-keys -t ":${window_index}" C-m
+        fi
+
+        tmux select-window -t ":${window_index}"
+    fi
+}
+
+# =============================================================================
+# SEARCH (sesh + fzf)
+# =============================================================================
+
+search_and_connect() {
+    local selected
+
+    if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+        local temp_file
+        temp_file=$(mktemp -t tmux-shunpo.XXXXXX) || {
+            notify "Error: could not create temporary file" "error"
+            return 1
+        }
+        trap 'rm -f "'"${temp_file}"'"' EXIT INT TERM
+
+        set +e
+        tmux popup -E -w 90% -h 80% "sesh list --icons | fzf --ansi --no-sort \
+            --border-label ' shunpo → sesh ' \
+            --prompt '⚡ ' \
+            --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill' \
+            --bind 'tab:down,btab:up' \
+            --bind 'ctrl-a:change-prompt(⚡  )+reload(sesh list --icons)' \
+            --bind 'ctrl-t:change-prompt(🪟  )+reload(sesh list -t --icons)' \
+            --bind 'ctrl-g:change-prompt(⚙️  )+reload(sesh list -c --icons)' \
+            --bind 'ctrl-z:change-prompt(📁  )+reload(sesh list -z --icons)' \
+            --bind 'ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(⚡  )+reload(sesh list --icons)' \
+            --preview-window \"right:${CFG_FINDER_PREVIEW_PERCENT}%\" \
+            --preview 'sesh preview {}' > '${temp_file}'"
+        local rc=$?
+        set -e
+
+        if [[ ${rc} -eq 0 && -s "${temp_file}" ]]; then
+            selected=$(head -n1 "${temp_file}")
+        fi
+        rm -f "${temp_file}"
+    else
+        set +e
+        selected=$(sesh list --icons | fzf --ansi --no-sort \
+            --height "${CFG_FINDER_HEIGHT_PERCENT}%" \
+            --layout reverse --border \
+            --prompt '⚡ ' \
+            --preview-window "right:${CFG_FINDER_PREVIEW_PERCENT}%" \
+            --preview 'sesh preview {}')
+        set -e
+    fi
+
+    if [[ -n "${selected}" ]]; then
+        if ! sesh connect "${selected}"; then
+            notify "Failed to connect to session: ${selected}" "error"
+            return 1
+        fi
+    else
+        notify "No session selected. Cancelled."
+    fi
+}
+
+# =============================================================================
+# GUM-BASED EDITORS
+# =============================================================================
+
+ui_edit_marks() {
+    check_gum
+
+    while true; do
+        gum style --border rounded --padding "0 1" \
+            --border-foreground 212 --bold "⚡ Marks"
+
+        local slot
+        for slot in $(seq 1 9); do
+            local value
+            value=$(parse_marks "${slot}" 2>/dev/null) || value=""
+            if [[ -n "${value}" ]]; then
+                printf '  %d  %s\n' "${slot}" "${value}"
+            else
+                printf '  %d  %s\n' "${slot}" "(empty)"
+            fi
+        done
+        printf '\n'
+
+        local action
+        action=$(gum choose "Set mark" "Clear mark" "Done") || break
+
+        case "${action}" in
+            "Set mark")
+                local slot_choice
+                slot_choice=$(gum choose --header "Select slot" "$(seq 1 9 || true)") || continue
+
+                local method
+                method=$(gum choose --header "Source" \
+                    "Pick from sesh sessions" \
+                    "Enter manually") || continue
+
+                local new_value=""
+                case "${method}" in
+                    "Pick from sesh sessions")
+                        new_value=$(sesh list -t -c -z 2>/dev/null | gum filter \
+                            --header "Select session" \
+                            --placeholder "Filter...") || continue
+                        ;;
+                    "Enter manually")
+                        local current
+                        current=$(parse_marks "${slot_choice}" 2>/dev/null) || current=""
+                        new_value=$(gum input \
+                            --header "Session name or path for slot ${slot_choice}" \
+                            --placeholder "session-name or ~/path" \
+                            --value "${current}") || continue
+                        ;;
+                esac
+
+                [[ -z "${new_value}" ]] && continue
+                mark_set "${slot_choice}" "${new_value}"
+                ;;
+            "Clear mark")
+                local filled=""
+                for slot in $(seq 1 9); do
+                    local val
+                    val=$(parse_marks "${slot}" 2>/dev/null) || continue
+                    filled="${filled}$(printf '%d: %s\n' "${slot}" "${val}")"
+                done
+                if [[ -z "${filled}" ]]; then
+                    gum style --foreground 208 "No marks to clear"
+                    sleep 1
+                    continue
+                fi
+                local to_clear
+                to_clear=$(printf '%s' "${filled}" | gum choose \
+                    --header "Select mark to clear") || continue
+                local clear_slot="${to_clear%%:*}"
+                mark_remove "${clear_slot}"
+                ;;
+            "Done")
+                break
+                ;;
+        esac
+    done
+}
+
+ui_edit_tools() {
+    check_gum
+
+    local session_name
+    session_name=$(tmux display-message -p '#S' 2>/dev/null) || {
+        notify "Not in a tmux session" "error"
+        return 1
+    }
+
+    validate_session_name "${session_name}" || error_exit "Invalid session name: ${session_name}"
+
+    local -A templates
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^([^:]+):::(.+)$ ]]; then
+            templates["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+        fi
+    done < <(config_load_tool_templates || true)
+
+    tool_auto_populate "${session_name}"
+
+    while true; do
+        gum style --border rounded --padding "0 1" \
+            --border-foreground 212 --bold "⚡ Tools — ${session_name}"
+
+        local slot
+        for slot in $(seq 1 9); do
+            local tool_data
+            if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
+                local cmd="${tool_data#*:::}"
+                if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+                    local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
+                    printf '  @%d  %s (→ %s)\n' "${slot}" "${cmd}" "${expanded}"
+                else
+                    printf '  @%d  %s\n' "${slot}" "${cmd}"
+                fi
+            else
+                printf '  @%d  %s\n' "${slot}" "(empty)"
+            fi
+        done
+        printf '\n'
+
+        local action
+        action=$(gum choose "Set tool" "Clear tool" "Done") || break
+
+        case "${action}" in
+            "Set tool")
+                local slot_choice
+                slot_choice=$(gum choose --header "Select slot" "$(seq 1 9 || true)") || continue
+
+                local method
+                method=$(gum choose --header "Source" \
+                    "Pick from sesh window templates" \
+                    "Enter command manually" \
+                    "Shell (default shell)") || continue
+
+                local new_cmd=""
+                case "${method}" in
+                    "Pick from sesh window templates")
+                        if [[ ${#templates[@]} -eq 0 ]]; then
+                            gum style --foreground 208 \
+                                "No [[window]] entries in sesh.toml"
+                            sleep 1
+                            continue
+                        fi
+                        local template_names
+                        template_names=$(printf '%s\n' "${!templates[@]}")
+                        local picked
+                        picked=$(printf '%s' "${template_names}" | gum filter \
+                            --header "Select template") || continue
+                        new_cmd="@${picked}"
+                        ;;
+                    "Enter command manually")
+                        local current_cmd=""
+                        if tool_data=$(get_tool "${session_name}" "${slot_choice}" 2>/dev/null); then
+                            current_cmd="${tool_data#*:::}"
+                        fi
+                        new_cmd=$(gum input \
+                            --header "Command for slot @${slot_choice}" \
+                            --placeholder "e.g. nvim . or cargo watch -x run" \
+                            --value "${current_cmd}") || continue
+                        if [[ ! "${new_cmd}" =~ ^@ ]]; then
+                            if ! validate_command "${new_cmd}" 2>/dev/null; then
+                                gum style --foreground 196 \
+                                    "Invalid command: contains unsafe characters"
+                                sleep 1
+                                continue
+                            fi
+                        fi
+                        ;;
+                    "Shell (default shell)")
+                        new_cmd="@shell"
+                        ;;
+                esac
+
+                [[ -z "${new_cmd}" ]] && continue
+                tool_set "${session_name}" "${slot_choice}" "${new_cmd}"
+                ;;
+            "Clear tool")
+                local filled=""
+                for slot in $(seq 1 9); do
+                    if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
+                        filled="${filled}$(printf '@%d: %s\n' "${slot}" "${tool_data#*:::}")"
+                    fi
+                done
+                if [[ -z "${filled}" ]]; then
+                    gum style --foreground 208 "No tools to clear"
+                    sleep 1
+                    continue
+                fi
+                local to_clear
+                to_clear=$(printf '%s' "${filled}" | gum choose \
+                    --header "Select tool to clear") || continue
+                local clear_slot="${to_clear#@}"
+                clear_slot="${clear_slot%%:*}"
+                tool_remove "${session_name}" "${clear_slot}"
+                ;;
+            "Done")
+                break
+                ;;
+        esac
+    done
+}
+
+# =============================================================================
+# RESET
+# =============================================================================
+
+data_reset() {
+    local scope="${1:-session}"
+
+    case "${scope}" in
+        session)
+            local session_name
+            session_name=$(tmux display-message -p '#S' 2>/dev/null) || {
+                notify "Not in a tmux session" "error"
+                return 1
+            }
+            local tools_file="${DATA_DIR}/tools/${session_name}"
+            if [[ -f "${tools_file}" ]]; then
+                if [[ -t 0 ]]; then
+                    echo "Delete tools for session '${session_name}'? (y/N): "
+                    local REPLY
+                    read -r REPLY
+                    if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+                        rm -f "${tools_file}"
+                        notify "Tools for session '${session_name}' reset"
+                    else
+                        notify "Reset cancelled"
+                    fi
+                else
+                    rm -f "${tools_file}"
+                    notify "Tools for session '${session_name}' reset"
+                fi
+            else
+                notify "No tools file found for session '${session_name}'"
+            fi
+            ;;
+        all)
+            if [[ -t 0 ]]; then
+                echo "Delete ALL tmux-shunpo data? (y/N): "
+                local REPLY
+                read -r REPLY
+                if [[ ${REPLY} =~ ^[Yy]$ ]]; then
+                    rm -f "${MARKS_FILE}"
+                    rm -rf "${DATA_DIR}/tools"
+                    mkdir -p "${DATA_DIR}/tools"
+                    notify "All tmux-shunpo data reset"
+                else
+                    notify "Reset cancelled"
+                fi
+            else
+                rm -f "${MARKS_FILE}"
+                rm -rf "${DATA_DIR}/tools"
+                mkdir -p "${DATA_DIR}/tools"
+                notify "All tmux-shunpo data reset"
+            fi
+            ;;
+        *)
+            error_exit "Invalid reset scope '${scope}'. Use 'session' or 'all'"
+            ;;
+    esac
+}
+
+# =============================================================================
+# USAGE & CLI
+# =============================================================================
+
+show_usage() {
+    cat <<'EOF'
+Usage: tmux-shunpo [OPTION]
+
+Session Navigation:
+  --search               Fuzzy search sessions via sesh + fzf (tmux popup when from keybinding)
+  --goto N               Jump to mark slot N (1-9) via sesh connect
+  --goto @N              Navigate to tool window slot N (1-9)
+
+Mark Management:
+  --add                  Mark current session (inside tmux) or current directory (outside tmux)
+  --remove N             Remove mark slot N
+  --remove all           Remove all marks
+  --marks                Interactive mark editor (gum TUI, tmux popup when from keybinding)
+
+Tool Management:
+  --tools                Interactive tool editor for current session (gum TUI, tmux popup)
+
+Maintenance:
+  --reset [session|all]  Reset tools for current session, or all data
+
+Info:
+  -h, --help             Show usage
+  -v, --version          Show version
+
+Configuration:
+  ~/.config/tmux-shunpo/config.toml    UI/behavior settings
+  ~/.config/sesh/sesh.toml             Session + window definitions (tool templates)
+  ~/.local/share/tmux-shunpo/marks     Mark storage
+  ~/.local/share/tmux-shunpo/tools/    Per-session tool storage
+EOF
+}
+
+main() {
+    # Warn about deprecated config.conf
+    if [[ -f "${CONFIG_DIR}/config.conf" && ! -f "${CONFIG_FILE}" ]]; then
+        notify "config.conf is deprecated. Create config.toml (see --help)" "error"
+    fi
+
+    # Dependency checks
+    case "${1:-}" in
+        --marks|--tools)
+            check_dependencies
+            check_gum
+            ;;
+        --search)
+            check_dependencies
+            ;;
+        --goto|--add|--remove|--reset)
+            check_dependencies
+            ;;
+        "")
+            : ;; # no deps needed for --help/--version
+        -h|--help|-v|--version)
+            : ;;
+        *)
+            check_dependencies
+            ;;
+    esac
+
+    cfg_load
+
+    case "${1:-}" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -v|--version)
+            echo "tmux-shunpo v${VERSION}"
+            exit 0
+            ;;
+        "")
+            show_usage
+            exit 0
+            ;;
+        --search)
+            search_and_connect
+            ;;
+        --goto)
+            if [[ -z "${2:-}" ]]; then
+                error_exit "--goto requires a target (mark slot or @tool)"
+            fi
+            if [[ "$2" =~ ^@([1-9])$ ]]; then
+                navigate_to_tool "${BASH_REMATCH[1]}"
+            else
+                mark_jump_to "$2"
+            fi
+            ;;
+        --add)
+            mark_add
+            ;;
+        --remove)
+            if [[ -z "${2:-}" ]]; then
+                error_exit "--remove requires a target (mark slot number or 'all')"
+            fi
+            mark_remove "$2"
+            ;;
+        --marks)
+            if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+                tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
+                    "$0 --marks"
+                exit 0
+            fi
+            ui_edit_marks
+            ;;
+        --tools)
+            if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+                tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
+                    "$0 --tools"
+                exit 0
+            fi
+            ui_edit_tools
+            ;;
+        --reset)
+            data_reset "${2:-session}"
+            ;;
+        *)
+            error_exit "Unknown option '$1'. Use --help for usage information."
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
+    main "$@"
+fi

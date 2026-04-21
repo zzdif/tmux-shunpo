@@ -1,0 +1,41 @@
+[default_session]
+startup_command = "nvim"
+windows = ["editor", "shell"]
+
+[[session]]
+name = "test-project"
+path = "~/Code/test"
+startup_command = "nvim"
+windows = ["editor", "tests", "agent"]
+
+[[session]]
+name = "no-windows-project"
+path = "~/Code/no-windows"
+startup_command = "nvim"
+
+[[wildcard]]
+pattern = "~/Code/*"
+windows = ["editor", "devserver", "shell"]
+
+[[wildcard]]
+pattern = "~/Notes/*"
+windows = ["editor"]
+
+[[window]]
+name = "editor"
+startup_script = "nvim ."
+
+[[window]]
+name = "tests"
+startup_script = "bats tests/"
+
+[[window]]
+name = "devserver"
+startup_script = "cargo watch -x run"
+
+[[window]]
+name = "agent"
+startup_script = "pi"
+
+[[window]]
+name = "shell"

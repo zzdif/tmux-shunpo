@@ -1,0 +1,22 @@
+# tmux-shunpo configuration (TOML)
+# UI and behavior settings only. Session/window definitions live in sesh.toml.
+
+# Tool window base index. Slot N → window (base + N - 1).
+# Default: 88 → tools use windows 88-96
+tool_window_base = 88
+
+# Shell init delay (seconds) — wait for prompt themes like Starship
+shell_init_delay = 0.2
+
+# Window name max length
+window_name_max_length = 20
+
+# Popup dimensions for tmux display-popup
+[ui]
+popup_width = "80%"
+popup_height = "70%"
+
+# Fuzzy finder dimensions
+[finder]
+height_percent = 50
+preview_percent = 50
