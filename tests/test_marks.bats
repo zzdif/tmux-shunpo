@@ -127,6 +127,25 @@ teardown() {
     assert_output "c"
 }
 
+@test "mark_set accepts valid session names" {
+    mark_set 1 "my-project"
+    run parse_marks 1
+    assert_output "my-project"
+}
+
+@test "mark_set accepts tilde paths" {
+    mark_set 1 "~/Code/project"
+    run parse_marks 1
+    assert_output "~/Code/project"
+}
+
+@test "mark_set rejects mark values with shell metacharacters" {
+    run mark_set 1 '; rm -rf /'
+    assert_failure
+    run mark_set 1 'test$(whoami)'
+    assert_failure
+}
+
 @test "mark_set uses atomic write (no tmp files remain)" {
     mark_set 1 "test-session"
     local tmp_files

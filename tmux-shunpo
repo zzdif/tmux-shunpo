@@ -166,7 +166,7 @@ cfg_load() {
     CFG_POPUP_WIDTH="80%"
     CFG_POPUP_HEIGHT="70%"
     CFG_FINDER_HEIGHT_PERCENT=50
-CFG_FINDER_PREVIEW_PERCENT=50  # used by search_and_connect
+    CFG_FINDER_PREVIEW_PERCENT=50
 
     if ! cfg_check_file_safety "${CONFIG_FILE}"; then
         return 1
@@ -199,7 +199,12 @@ CFG_FINDER_PREVIEW_PERCENT=50  # used by search_and_connect
     val=$(yq -p toml '.finder.preview_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
     [[ -n "${val}" ]] && CFG_FINDER_PREVIEW_PERCENT="${val}"
 
-    # CFG_FINDER_PREVIEW_PERCENT is used in search_and_connect fzf preview window
+    # Validate numeric configs — malformed values fall back to defaults
+    [[ "${CFG_TOOL_WINDOW_BASE}" =~ ^[0-9]+$ ]] || CFG_TOOL_WINDOW_BASE=88
+    [[ "${CFG_SHELL_INIT_DELAY}" =~ ^[0-9]+\.?[0-9]*$ ]] || CFG_SHELL_INIT_DELAY=0.2
+    [[ "${CFG_WINDOW_NAME_MAX_LENGTH}" =~ ^[0-9]+$ ]] || CFG_WINDOW_NAME_MAX_LENGTH=20
+    [[ "${CFG_FINDER_HEIGHT_PERCENT}" =~ ^[0-9]+$ ]] || CFG_FINDER_HEIGHT_PERCENT=50
+    [[ "${CFG_FINDER_PREVIEW_PERCENT}" =~ ^[0-9]+$ ]] || CFG_FINDER_PREVIEW_PERCENT=50
 }
 
 # =============================================================================
@@ -297,6 +302,7 @@ mark_set() {
     local session_ref="$2"
     validate_range "${slot}" 1 9 "Slot must be between 1-9"
     [[ -z "${session_ref// }" ]] && error_exit "Cannot set empty mark" 128
+    validate_mark_entry "${session_ref}" || error_exit "Invalid mark value: contains unsafe characters" 128
 
     local -A marks
     local line
@@ -486,11 +492,15 @@ mark_jump_to() {
 
     if [[ "${target}" =~ ^[0-9]+$ ]]; then
         if session_ref=$(parse_marks "${target}"); then
-            if [[ "${session_ref}" == /* || "${session_ref}" == ~* ]] && [[ ! -d "${session_ref}" ]]; then
-                # session_ref is a path that no longer exists
-                mark_remove_invalid "${target}" "${session_ref}" 2>/dev/null || true
-                notify "Mark ${target} path no longer exists" "error"
-                return 1
+            if [[ "${session_ref}" == /* || "${session_ref}" == ~* ]]; then
+                # Expand tilde for filesystem check (-d does not expand ~)
+                local check_path="${session_ref/#\~/${HOME}}"
+                if [[ ! -d "${check_path}" ]]; then
+                    # session_ref is a path that no longer exists
+                    mark_remove_invalid "${target}" "${session_ref}" 2>/dev/null || true
+                    notify "Mark ${target} path no longer exists" "error"
+                    return 1
+                fi
             fi
             if ! sesh connect "${session_ref}"; then
                 notify "Failed to connect to session: ${session_ref}" "error"
@@ -522,6 +532,7 @@ config_load_tool_templates() {
 
 sesh_resolve_window_template() {
     local template_name="$1"
+    validate_template_name "${template_name}" || return 1
     if [[ ! -f "${SESH_CONFIG}" ]]; then
         return 1
     fi
@@ -534,6 +545,7 @@ sesh_resolve_window_template() {
 
 tool_auto_populate() {
     local session_name="$1"
+    validate_session_name "${session_name}" || return 1
     local tools_file="${DATA_DIR}/tools/${session_name}"
 
     if [[ -f "${tools_file}" ]]; then
@@ -582,17 +594,22 @@ tool_auto_populate() {
     fi
 
     mkdir -p "$(dirname "${tools_file}")"
-    {
-        echo "# auto-generated from sesh.toml"
-        local slot=1
-        local window_name
-        while IFS= read -r window_name; do
-            [[ -z "${window_name}" ]] && continue
-            [[ ${slot} -gt 9 ]] && break
-            echo "${slot}: @${window_name}"
-            slot=$((slot + 1))
-        done < <(printf '%s' "${windows_json}" | yq -o tsv '.[]' 2>/dev/null || true)
-    } > "${tools_file}"
+    local content="# auto-generated from sesh.toml"
+    local slot=1
+    local window_name
+    while IFS= read -r window_name; do
+        [[ -z "${window_name}" ]] && continue
+        [[ ${slot} -gt 9 ]] && break
+        # Validate window name before writing as @reference (SEC-09)
+        if ! validate_template_name "${window_name}" 2>/dev/null; then
+            continue
+        fi
+        content="${content}
+${slot}: @${window_name}"
+        slot=$((slot + 1))
+    done < <(printf '%s' "${windows_json}" | yq -o tsv '.[]' 2>/dev/null || true)
+
+    atomic_write "${tools_file}" "${content}"
 }
 
 get_tool() {
@@ -778,9 +795,10 @@ navigate_to_tool() {
             command="${resolved}"
         elif [[ "${tmpl}" == "shell" ]]; then
             command="$(tmux show-option -gv default-shell)"
+        else
+            notify "Template '@${tmpl}' not found in sesh.toml" "error"
+            return 1
         fi
-    elif [[ "${command}" == "@shell" ]]; then
-        command="$(tmux show-option -gv default-shell)"
     fi
 
     # Security: validate final command before execution

@@ -34,7 +34,7 @@ case "$*" in
     *".ui.popup_height"*) echo "60%" ;;
     *".finder.height_percent"*) echo "40" ;;
     *".finder.preview_percent"*) echo "45" ;;
-    *) echo "" ;;
+    *) ;;
 esac
 MOCK
     chmod +x "${MOCK_BIN}/yq"
@@ -99,4 +99,32 @@ MOCK
 @test "cfg_check_file_safety accepts missing file" {
     run cfg_check_file_safety "${TEST_TEMP_DIR}/nonexistent.toml"
     assert_success
+}
+
+@test "cfg_load falls back to defaults for non-numeric tool_window_base" {
+    cat > "${MOCK_BIN}/yq" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+    *".tool_window_base // 88"*) echo "not-a-number" ;;
+    *) ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/yq"
+    touch "${CONFIG_FILE}"
+    cfg_load
+    [[ "${CFG_TOOL_WINDOW_BASE}" == "88" ]]
+}
+
+@test "cfg_load falls back to defaults for non-numeric shell_init_delay" {
+    cat > "${MOCK_BIN}/yq" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+    *".shell_init_delay // 0.2"*) echo "abc" ;;
+    *) ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/yq"
+    touch "${CONFIG_FILE}"
+    cfg_load
+    [[ "${CFG_SHELL_INIT_DELAY}" == "0.2" ]]
 }

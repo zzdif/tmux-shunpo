@@ -138,6 +138,48 @@ MOCK
     [[ "${lines}" -eq 9 ]]
 }
 
+@test "tool_auto_populate validates window names from sesh.toml" {
+    # Mock yq to return a malicious window name
+    cat > "${MOCK_BIN}/yq" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+    *".default_session.windows"*) echo '["valid","evil;rm","ok"]' ;;
+    *"-o tsv .[]"*) printf 'valid\nevil;rm\nok\n' ;;
+    *) echo "" ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/yq"
+    touch "${SESH_CONFIG}"
+
+    tool_auto_populate "test-session"
+    # evil;rm should be skipped (fails validate_template_name)
+    run grep 'evil' "${DATA_DIR}/tools/test-session"
+    assert_failure
+    # valid and ok should be present
+    run grep '@valid' "${DATA_DIR}/tools/test-session"
+    assert_success
+    run grep '@ok' "${DATA_DIR}/tools/test-session"
+    assert_success
+}
+
+@test "tool_auto_populate uses atomic write" {
+    cat > "${MOCK_BIN}/yq" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+    *".default_session.windows"*) echo '["editor"]' ;;
+    *"-o tsv .[]"*) echo 'editor' ;;
+    *) echo "" ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/yq"
+    touch "${SESH_CONFIG}"
+
+    tool_auto_populate "atomic-test"
+    local tmp_files
+    tmp_files=$(find "${DATA_DIR}" -name '*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')
+    [[ "${tmp_files}" -eq 0 ]]
+}
+
 @test "tool_set uses atomic write" {
     tool_set "test-session" 1 "nvim ."
     local tmp_files

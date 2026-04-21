@@ -68,10 +68,13 @@ teardown() {
 @test "mark_set does not execute injected session names" {
     local canary="${TEST_TEMP_DIR}/pwned"
 
-    mark_set 1 "; touch ${canary}" 2>/dev/null || true
+    # mark_set now validates mark entries — these should be rejected
+    run mark_set 1 "; touch ${canary}"
+    assert_failure
     assert_file_not_exist "${canary}"
 
-    mark_set 1 '\$(touch "${canary}")' 2>/dev/null || true
+    run mark_set 1 '$(touch canary)'
+    assert_failure
     assert_file_not_exist "${canary}"
 }
 
@@ -82,6 +85,29 @@ teardown() {
 
 @test "tool_set rejects invalid session names" {
     run tool_set "../../etc/passwd" 1 "nvim ."
+    assert_failure
+}
+
+@test "mark_set rejects adversarial mark values" {
+    run mark_set 1 '; rm -rf /'
+    assert_failure
+    run mark_set 1 '$(whoami)'
+    assert_failure
+    run mark_set 1 '| cat /etc/passwd'
+    assert_failure
+}
+
+@test "sesh_resolve_window_template validates template name internally" {
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    run sesh_resolve_window_template 'editor;rm'
+    assert_failure
+    run sesh_resolve_window_template '../etc'
+    assert_failure
+}
+
+@test "tool_auto_populate validates session name internally" {
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    run tool_auto_populate '../../etc/passwd'
     assert_failure
 }
 
