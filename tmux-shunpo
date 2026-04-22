@@ -17,6 +17,10 @@ VERSION="0.1.0"
 
 set -euo pipefail
 
+# Ensure common binary directories are available (needed when called from tmux run-shell/popup
+# where PATH may be stripped, causing sesh to fail finding tmux).
+export PATH="/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:${PATH}"
+
 if [[ "${DEBUG:-}" == "1" ]]; then
     export PS4='+[${BASH_SOURCE[0]##*/}:${LINENO}${FUNCNAME[0]:+:${FUNCNAME[0]}()}] '
     set -x
