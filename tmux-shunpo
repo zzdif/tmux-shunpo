@@ -50,6 +50,13 @@ DATA_DIR="${DATA_DIR:-${HOME}/.local/share/tmux-shunpo}"
 MARKS_FILE="${MARKS_FILE:-${DATA_DIR}/marks}"
 SESH_CONFIG="${SESH_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/sesh/sesh.toml}"
 
+# Resolve script path once for popup re-invocation
+# Resolve script path once for popup re-invocation
+local_dir="$(dirname "${BASH_SOURCE[0]}" || true)"
+local_base="$(basename "${BASH_SOURCE[0]}" || true)"
+SCRIPT_PATH="$(cd "${local_dir}" && pwd)/${local_base}"
+unset local_dir local_base
+
 mkdir -p "${CONFIG_DIR}" || { echo "Error: cannot create config directory" >&2; exit 1; }
 mkdir -p "${DATA_DIR}" || { echo "Error: cannot create data directory" >&2; exit 1; }
 
@@ -907,7 +914,7 @@ get_finder() {
 }
 
 search_and_connect() {
-    local selected
+    local selected=""
     local finder
     finder=$(get_finder) || error_exit "fzf or sk not found"
 
@@ -918,8 +925,8 @@ search_and_connect() {
         --height "${CFG_FINDER_HEIGHT_PERCENT}%"
         --layout reverse
         --border
-        --prompt '⚡ '
-        --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill'
+        --prompt "${CFG_TOOL_WINDOW_PREFIX} "
+        --header "  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill"
         --preview-window "right:${CFG_FINDER_PREVIEW_PERCENT}%"
         --preview 'sesh preview {}'
     )
@@ -927,11 +934,11 @@ search_and_connect() {
         finder_args+=(
             --border-label ' shunpo → sesh '
             --bind 'tab:down,btab:up'
-            --bind 'ctrl-a:change-prompt(⚡  )+reload(sesh list --icons)'
+            --bind "ctrl-a:change-prompt(${CFG_TOOL_WINDOW_PREFIX}  )+reload(sesh list --icons)"
             --bind 'ctrl-t:change-prompt(🪟  )+reload(sesh list -t --icons)'
             --bind 'ctrl-g:change-prompt(⚙️  )+reload(sesh list -c --icons)'
             --bind 'ctrl-z:change-prompt(📁  )+reload(sesh list -z --icons)'
-            --bind 'ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(⚡  )+reload(sesh list --icons)'
+            --bind "ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(${CFG_TOOL_WINDOW_PREFIX}  )+reload(sesh list --icons)"
         )
     fi
 
@@ -968,9 +975,9 @@ search_and_connect() {
             notify "Failed to connect to session: ${selected}" "error"
             return 1
         fi
-    else
-        notify "No session selected. Cancelled."
     fi
+    # Empty selection = user cancelled (e.g. Escape in fzf) — silent exit
+    return 0
 }
 
 # =============================================================================
@@ -983,7 +990,7 @@ ui_edit_marks() {
     while true; do
         clear
         gum style --border rounded --padding "0 1" \
-            --border-foreground 212 --bold "⚡ Marks"
+            --border-foreground 212 --bold "${CFG_TOOL_WINDOW_PREFIX} Marks"
 
         local slot
         for slot in $(seq 1 9); do
@@ -1099,7 +1106,7 @@ ui_edit_tools() {
     while true; do
         clear
         gum style --border rounded --padding "0 1" \
-            --border-foreground 212 --bold "⚡ Tools — ${session_name}"
+            --border-foreground 212 --bold "${CFG_TOOL_WINDOW_PREFIX} Tools — ${session_name}"
 
         local slot
         for slot in $(seq 1 9); do
@@ -1386,7 +1393,7 @@ main() {
         --marks)
             if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
                 tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
-                    "$0 --marks"
+                    "${SCRIPT_PATH} --marks"
                 exit 0
             fi
             ui_edit_marks
@@ -1394,7 +1401,7 @@ main() {
         --tools)
             if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
                 tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
-                    "$0 --tools"
+                    "${SCRIPT_PATH} --tools"
                 exit 0
             fi
             ui_edit_tools
