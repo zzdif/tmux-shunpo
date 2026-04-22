@@ -911,6 +911,30 @@ search_and_connect() {
     local finder
     finder=$(get_finder) || error_exit "fzf or sk not found"
 
+    # Build finder args array (avoids quoting/word-splitting issues)
+    local -a finder_args=(
+        --ansi
+        --no-sort
+        --height "${CFG_FINDER_HEIGHT_PERCENT}%"
+        --layout reverse
+        --border
+        --prompt '⚡ '
+        --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill'
+        --preview-window "right:${CFG_FINDER_PREVIEW_PERCENT}%"
+        --preview 'sesh preview {}'
+    )
+    if [[ "${finder}" == "fzf" ]]; then
+        finder_args+=(
+            --border-label ' shunpo → sesh '
+            --bind 'tab:down,btab:up'
+            --bind 'ctrl-a:change-prompt(⚡  )+reload(sesh list --icons)'
+            --bind 'ctrl-t:change-prompt(🪟  )+reload(sesh list -t --icons)'
+            --bind 'ctrl-g:change-prompt(⚙️  )+reload(sesh list -c --icons)'
+            --bind 'ctrl-z:change-prompt(📁  )+reload(sesh list -z --icons)'
+            --bind 'ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(⚡  )+reload(sesh list --icons)'
+        )
+    fi
+
     if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
         local temp_file
         temp_file=$(mktemp -t tmux-shunpo.XXXXXX) || {
@@ -919,23 +943,13 @@ search_and_connect() {
         }
         trap 'rm -f "'"${temp_file}"'"' EXIT INT TERM
 
-        local border_label_flag=""
-        [[ "${finder}" == "fzf" ]] && border_label_flag="--border-label ' shunpo → sesh '"
+        # Serialize array into popup command string
+        local cmd_args
+        cmd_args=$(printf '%q ' "${finder_args[@]}")
 
         set +e
         tmux popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
-            "sesh list --icons | ${finder} --ansi --no-sort \
-            ${border_label_flag} \
-            --prompt '⚡ ' \
-            --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill' \
-            --bind 'tab:down,btab:up' \
-            --bind 'ctrl-a:change-prompt(⚡  )+reload(sesh list --icons)' \
-            --bind 'ctrl-t:change-prompt(🪟  )+reload(sesh list -t --icons)' \
-            --bind 'ctrl-g:change-prompt(⚙️  )+reload(sesh list -c --icons)' \
-            --bind 'ctrl-z:change-prompt(📁  )+reload(sesh list -z --icons)' \
-            --bind 'ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(⚡  )+reload(sesh list --icons)' \
-            --preview-window \"right:${CFG_FINDER_PREVIEW_PERCENT}%\" \
-            --preview 'sesh preview {}' > '${temp_file}'"
+            "sesh list --icons | ${finder} ${cmd_args} > '${temp_file}'"
         local rc=$?
         set -e
 
@@ -950,13 +964,7 @@ search_and_connect() {
         printf '  │ ^d kill session                      │\n'
         printf '  └────────────────────────────────────────┘\n\n'
         set +e
-        selected=$(sesh list --icons | "${finder}" --ansi --no-sort \
-            --height "${CFG_FINDER_HEIGHT_PERCENT}%" \
-            --layout reverse --border \
-            --prompt '⚡ ' \
-            --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill' \
-            --preview-window "right:${CFG_FINDER_PREVIEW_PERCENT}%" \
-            --preview 'sesh preview {}')
+        selected=$(sesh list --icons | "${finder}" "${finder_args[@]}")
         set -e
     fi
 
