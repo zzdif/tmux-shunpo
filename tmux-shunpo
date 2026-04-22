@@ -978,7 +978,7 @@ ui_edit_marks() {
         case "${action}" in
             "Set mark")
                 local slot_choice
-                slot_choice=$(gum choose --header "Select slot" "$(seq 1 9 || true)") || continue
+                slot_choice=$(seq 1 9 | gum choose --header "Select slot") || continue
 
                 local method
                 method=$(gum choose --header "Source" \
@@ -1077,7 +1077,7 @@ ui_edit_tools() {
         case "${action}" in
             "Set tool")
                 local slot_choice
-                slot_choice=$(gum choose --header "Select slot" "$(seq 1 9 || true)") || continue
+                slot_choice=$(seq 1 9 | gum choose --header "Select slot") || continue
 
                 local method
                 method=$(gum choose --header "Source" \
