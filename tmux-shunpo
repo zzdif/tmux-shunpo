@@ -1043,19 +1043,19 @@ ui_edit_marks() {
                 mark_set "${slot_choice}" "${new_value}"
                 ;;
             "Clear mark")
-                local filled=""
+                local -a filled=()
                 for slot in $(seq 1 9); do
                     local val
                     val=$(parse_marks "${slot}" 2>/dev/null) || continue
-                    filled="${filled}$(printf '%d: %s\n' "${slot}" "${val}")"
+                    filled+=("${slot}: ${val}")
                 done
-                if [[ -z "${filled}" ]]; then
+                if [[ ${#filled[@]} -eq 0 ]]; then
                     gum style --foreground 208 "No marks to clear"
                     sleep 1
                     continue
                 fi
                 local to_clear
-                to_clear=$(printf '%s' "${filled}" | gum choose \
+                to_clear=$(printf '%s\n' "${filled[@]}" | gum choose \
                     --header "Select mark to clear") || continue
                 local clear_slot="${to_clear%%:*}"
                 mark_remove "${clear_slot}"
@@ -1188,19 +1188,19 @@ ui_edit_tools() {
                 tool_set "${session_name}" "${slot_choice}" "${new_cmd}"
                 ;;
             "Clear tool")
-                local filled=""
+                local -a filled=()
                 for slot in $(seq 1 9); do
                     if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
-                        filled="${filled}$(printf '@%d: %s\n' "${slot}" "${tool_data#*:::}")"
+                        filled+=("@${slot}: ${tool_data#*:::}")
                     fi
                 done
-                if [[ -z "${filled}" ]]; then
+                if [[ ${#filled[@]} -eq 0 ]]; then
                     gum style --foreground 208 "No tools to clear"
                     sleep 1
                     continue
                 fi
                 local to_clear
-                to_clear=$(printf '%s' "${filled}" | gum choose \
+                to_clear=$(printf '%s\n' "${filled[@]}" | gum choose \
                     --header "Select tool to clear") || continue
                 local clear_slot="${to_clear#@}"
                 clear_slot="${clear_slot%%:*}"
