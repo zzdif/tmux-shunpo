@@ -186,3 +186,106 @@ MOCK
     tmp_files=$(find "${DATA_DIR}" -name '*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')
     [[ "${tmp_files}" -eq 0 ]]
 }
+
+# =============================================================================
+# @template window naming (resolved_command path in get_tool)
+# =============================================================================
+
+@test "get_tool @template derives window name from startup_script first word" {
+    # sesh.toml [[window]] name="editor" startup_script="nvim ." → window name "nvim"
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    tool_set "test-session" 1 "@editor"
+    run get_tool "test-session" 1
+    assert_success
+    # Format: name:::command. Name is before ':::', command is raw @editor.
+    assert_output "nvim:::@editor"
+}
+
+@test "get_tool @template strips command args for window name" {
+    # startup_script="cargo watch -x run" → window name "cargo" (first word only)
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    tool_set "test-session" 2 "@devserver"
+    run get_tool "test-session" 2
+    assert_success
+    assert_output "cargo:::@devserver"
+}
+
+@test "get_tool @template uses command name not template name" {
+    # @agent resolves to "pi" — window is "pi", not "agent"
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    tool_set "test-session" 3 "@agent"
+    run get_tool "test-session" 3
+    assert_success
+    assert_output "pi:::@agent"
+}
+
+@test "get_tool @shell without startup_script uses 'shell' as window name" {
+    # [[window]] name="shell" has no startup_script → resolved_command="shell"
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    tool_set "test-session" 4 "@shell"
+    run get_tool "test-session" 4
+    assert_success
+    assert_output "shell:::@shell"
+}
+
+@test "get_tool unknown @template falls back to stripped template name" {
+    # @nonexistent not in sesh.toml → resolved stays "@nonexistent"
+    # generate_window_name strips "@" → "nonexistent"
+    cp "${PROJECT_ROOT}/tests/fixtures/sesh_config.toml" "${SESH_CONFIG}"
+    tool_set "test-session" 5 "@nonexistent"
+    run get_tool "test-session" 5
+    assert_success
+    assert_output "nonexistent:::@nonexistent"
+}
+
+@test "get_tool @template with no sesh.toml falls back to stripped template name" {
+    # SESH_CONFIG missing — sesh_resolve_window_template returns empty
+    [[ ! -f "${SESH_CONFIG}" ]]
+    tool_set "test-session" 1 "@editor"
+    run get_tool "test-session" 1
+    assert_success
+    assert_output "editor:::@editor"
+}
+
+@test "get_tool @template sanitizes malicious startup_script for window name" {
+    # Adversarial sesh.toml: startup_script starts with shell metacharacters.
+    # resolved_command is used ONLY for window naming, never executed.
+    # generate_window_name's sed filter must strip everything unsafe.
+    cat > "${SESH_CONFIG}" <<'TOML'
+[[window]]
+name = "evil"
+startup_script = "$(whoami); rm -rf /"
+TOML
+    tool_set "test-session" 1 "@evil"
+    run get_tool "test-session" 1
+    assert_success
+    # Output name:::command. Command must remain "@evil" (raw).
+    # Window name must be purely alphanumeric+_- (sed filter).
+    assert_output --partial ":::@evil"
+    local name="${output%%:::*}"
+    [[ "${name}" =~ ^[a-zA-Z0-9_-]+$ ]]
+    # First word is "$(whoami);" → sed strips → "whoami"
+    [[ "${name}" == "whoami" ]]
+}
+
+@test "get_tool @template window naming does not execute resolved_command (canary)" {
+    # If resolved_command were ever eval'd, the canary file would exist.
+    local canary="${TEST_TEMP_DIR}/pwned"
+    cat > "${SESH_CONFIG}" <<TOML
+[[window]]
+name = "malicious"
+startup_script = "\$(touch ${canary}) evil"
+TOML
+    tool_set "test-session" 1 "@malicious"
+    run get_tool "test-session" 1
+    assert_success
+    assert_file_not_exist "${canary}"
+}
+
+@test "get_tool inline command unchanged by resolved_command path" {
+    # Regression guard: non-@template commands must still name from first word.
+    tool_set "test-session" 1 "cargo test"
+    run get_tool "test-session" 1
+    assert_success
+    assert_output "cargo:::cargo test"
+}

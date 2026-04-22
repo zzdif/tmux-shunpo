@@ -702,8 +702,20 @@ get_tool() {
             command="${command#"${command%%[![:space:]]*}"}"
             command="${command%"${command##*[![:space:]]}"}"
             if [[ -n "${command}" ]]; then
+                local resolved_command="${command}"
+                # Resolve @template → actual command for window naming
+                if [[ "${command}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+                    local tmpl="${BASH_REMATCH[1]}"
+                    local resolved
+                    resolved=$(sesh_resolve_window_template "${tmpl}" 2>/dev/null) || true
+                    if [[ -n "${resolved}" ]]; then
+                        resolved_command="${resolved}"
+                    elif [[ "${tmpl}" == "shell" ]]; then
+                        resolved_command="shell"
+                    fi
+                fi
                 local window_name
-                window_name=$(generate_window_name "${command}")
+                window_name=$(generate_window_name "${resolved_command}")
                 echo "${window_name}:::${command}"
                 found=true
             fi
@@ -803,11 +815,6 @@ generate_window_name() {
     fi
 
     local first_word="${command%% *}"
-    # For @template refs use the template name directly as window name
-    # (more predictable than the resolved command's first word).
-    if [[ "${first_word}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
-        first_word="${BASH_REMATCH[1]}"
-    fi
 
     local window_name
     window_name=$(printf '%s' "${first_word}" | sed 's/[^a-zA-Z0-9_-]//g')
