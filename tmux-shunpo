@@ -507,8 +507,9 @@ mark_jump_to() {
                     return 1
                 fi
             fi
-            if ! sesh connect "${session_ref}"; then
-                notify "Failed to connect to session: ${session_ref}" "error"
+            local sesh_err
+            if ! sesh_err=$(sesh connect "${session_ref}" 2>&1); then
+                notify "Failed to connect to '${session_ref}': ${sesh_err}" "error"
                 return 1
             fi
             return 0
@@ -852,9 +853,7 @@ navigate_to_tool() {
         esac
 
         if [[ "${is_idle}" == true && "${is_shell_only}" == false ]]; then
-            local escaped_cmd
-            escaped_cmd=$(printf '%q' "${command}")
-            tmux send-keys -t ":${window_index}" -l -- "${escaped_cmd}"
+            tmux send-keys -t ":${window_index}" -l -- "${command}"
             tmux send-keys -t ":${window_index}" C-m
         fi
 
@@ -867,9 +866,7 @@ navigate_to_tool() {
         sleep "${CFG_SHELL_INIT_DELAY}"
 
         if [[ "${is_shell_only}" == false ]]; then
-            local escaped_cmd
-            escaped_cmd=$(printf '%q' "${command}")
-            tmux send-keys -t ":${window_index}" -l -- "${escaped_cmd}"
+            tmux send-keys -t ":${window_index}" -l -- "${command}"
             tmux send-keys -t ":${window_index}" C-m
         fi
 
@@ -1001,6 +998,10 @@ ui_edit_marks() {
                             --value "${current}") || continue
                         ;;
                 esac
+
+                # Trim leading/trailing whitespace from sesh/gum output
+                new_value="${new_value#"${new_value%%[![:space:]]*}"}"
+                new_value="${new_value%"${new_value##*[![:space:]]}"}"
 
                 [[ -z "${new_value}" ]] && continue
                 mark_set "${slot_choice}" "${new_value}"
