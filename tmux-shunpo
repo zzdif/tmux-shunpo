@@ -17,9 +17,23 @@ VERSION="0.1.0"
 
 set -euo pipefail
 
-# Ensure common binary directories are available (needed when called from tmux run-shell/popup
-# where PATH may be stripped, causing sesh to fail finding tmux).
-export PATH="/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:${PATH}"
+# Ensure tmux/sesh/yq/gum binaries are in PATH when called from tmux run-shell/popup
+# where PATH may differ from interactive shell (common with nix/homebrew).
+_ensure_in_path() {
+    local bin_path
+    bin_path=$(command -v "$1" 2>/dev/null) || return 0
+    local bin_dir
+    bin_dir=$(dirname "${bin_path}")
+    case ":${PATH}:" in
+        *":${bin_dir}:"*) ;;
+        *) export PATH="${bin_dir}:${PATH}" ;;
+    esac
+}
+_ensure_in_path tmux
+_ensure_in_path sesh
+_ensure_in_path yq
+_ensure_in_path gum
+unset -f _ensure_in_path
 
 if [[ "${DEBUG:-}" == "1" ]]; then
     export PS4='+[${BASH_SOURCE[0]##*/}:${LINENO}${FUNCNAME[0]:+:${FUNCNAME[0]}()}] '
