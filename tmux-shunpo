@@ -993,17 +993,25 @@ ui_edit_marks() {
 
         case "${action}" in
             "Set mark")
-                # Find earliest empty slot as default
-                local default_slot=1
+                # Build rich slot list (same info as main display) with cursor on earliest empty
+                local choices=()
+                local default_choice=""
                 local s
                 for s in $(seq 1 9); do
-                    if ! parse_marks "${s}" &>/dev/null; then
-                        default_slot="${s}"
-                        break
+                    local val
+                    val=$(parse_marks "${s}" 2>/dev/null) || val=""
+                    if [[ -n "${val}" ]]; then
+                        choices+=("${s}: ${val}")
+                    else
+                        choices+=("${s}: (empty)")
+                    fi
+                    if [[ -z "${val}" && -z "${default_choice}" ]]; then
+                        default_choice="${s}: (empty)"
                     fi
                 done
                 local slot_choice
-                slot_choice=$(seq 1 9 | gum choose --header "Select slot" --selected "${default_slot}") || continue
+                slot_choice=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select slot" --selected "${default_choice}") || continue
+                slot_choice="${slot_choice%%:*}"
 
                 local method
                 method=$(gum choose --header "Source" \
@@ -1106,17 +1114,30 @@ ui_edit_tools() {
 
         case "${action}" in
             "Set tool")
-                # Find earliest empty slot as default
-                local default_slot=1
+                # Build rich slot list (same info as main display) with cursor on earliest empty
+                local choices=()
+                local default_choice=""
                 local s
                 for s in $(seq 1 9); do
-                    if ! get_tool "${session_name}" "${s}" &>/dev/null; then
-                        default_slot="${s}"
-                        break
+                    local tool_data
+                    if tool_data=$(get_tool "${session_name}" "${s}" 2>/dev/null); then
+                        local cmd="${tool_data#*:::}"
+                        if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+                            local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
+                            choices+=("${s}: ${cmd} (→ ${expanded})")
+                        else
+                            choices+=("${s}: ${cmd}")
+                        fi
+                    else
+                        choices+=("${s}: (empty)")
+                    fi
+                    if [[ -z "${tool_data:-}" && -z "${default_choice}" ]]; then
+                        default_choice="${s}: (empty)"
                     fi
                 done
                 local slot_choice
-                slot_choice=$(seq 1 9 | gum choose --header "Select slot" --selected "${default_slot}") || continue
+                slot_choice=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select slot" --selected "${default_choice}") || continue
+                slot_choice="${slot_choice%%:*}"
 
                 local method
                 method=$(gum choose --header "Source" \
