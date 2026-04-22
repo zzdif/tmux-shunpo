@@ -969,9 +969,9 @@ search_and_connect() {
             --border-label ' shunpo → sesh '
             --bind 'tab:down,btab:up'
             --bind "ctrl-a:change-prompt(${CFG_TOOL_WINDOW_PREFIX}  )+reload(sesh list --icons)"
-            --bind 'ctrl-t:change-prompt(🪟  )+reload(sesh list -t --icons)'
-            --bind 'ctrl-g:change-prompt(⚙️  )+reload(sesh list -c --icons)'
-            --bind 'ctrl-z:change-prompt(📁  )+reload(sesh list -z --icons)'
+            --bind 'ctrl-t:change-prompt(  )+reload(sesh list -t --icons)'
+            --bind 'ctrl-g:change-prompt(  )+reload(sesh list -c --icons)'
+            --bind 'ctrl-z:change-prompt(  )+reload(sesh list -z --icons)'
             --bind "ctrl-d:execute(tmux kill-session -t {2..})+change-prompt(${CFG_TOOL_WINDOW_PREFIX}  )+reload(sesh list --icons)"
         )
     fi
