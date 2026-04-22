@@ -944,11 +944,17 @@ search_and_connect() {
         fi
         rm -f "${temp_file}"
     else
+        printf '\n  ⚡ Search sessions\n'
+        printf '  ┌────────────────────────────────────────┐\n'
+        printf '  │ ^a all  ^t tmux  ^g configs  ^z zoxide │\n'
+        printf '  │ ^d kill session                      │\n'
+        printf '  └────────────────────────────────────────┘\n\n'
         set +e
         selected=$(sesh list --icons | "${finder}" --ansi --no-sort \
             --height "${CFG_FINDER_HEIGHT_PERCENT}%" \
             --layout reverse --border \
             --prompt '⚡ ' \
+            --header '  ^a all  ^t tmux  ^g configs  ^z zoxide  ^d kill' \
             --preview-window "right:${CFG_FINDER_PREVIEW_PERCENT}%" \
             --preview 'sesh preview {}')
         set -e
