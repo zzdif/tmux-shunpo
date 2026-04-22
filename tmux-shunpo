@@ -958,11 +958,6 @@ search_and_connect() {
         fi
         rm -f "${temp_file}"
     else
-        printf '\n  ⚡ Search sessions\n'
-        printf '  ┌────────────────────────────────────────┐\n'
-        printf '  │ ^a all  ^t tmux  ^g configs  ^z zoxide │\n'
-        printf '  │ ^d kill session                      │\n'
-        printf '  └────────────────────────────────────────┘\n\n'
         set +e
         selected=$(sesh list --icons | "${finder}" "${finder_args[@]}")
         set -e
