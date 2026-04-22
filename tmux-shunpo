@@ -194,6 +194,7 @@ cfg_load() {
     CFG_FINDER_HEIGHT_PERCENT=50
     CFG_FINDER_PREVIEW_PERCENT=50
     CFG_TOOL_WINDOW_PREFIX="⚡"
+    CFG_DEFAULT_TOOLS_JSON=""
 
     if ! cfg_check_file_safety "${CONFIG_FILE}"; then
         return 1
@@ -228,6 +229,12 @@ cfg_load() {
 
     val=$(yq -p toml '.tool_window_prefix // "⚡"' "${CONFIG_FILE}" 2>/dev/null) || true
     [[ -n "${val}" ]] && CFG_TOOL_WINDOW_PREFIX="${val}"
+
+    # default_tools: array of entries assigned to new sessions.
+    # Each entry: "@name" (resolve via sesh [[window]]) or raw command.
+    # If set, takes priority over sesh-based auto-populate.
+    val=$(yq -p toml -o json '.default_tools // []' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" && "${val}" != "[]" && "${val}" != "null" ]] && CFG_DEFAULT_TOOLS_JSON="${val}"
 
     # Validate numeric configs — malformed values fall back to defaults
     [[ "${CFG_TOOL_WINDOW_BASE}" =~ ^[0-9]+$ ]] || CFG_TOOL_WINDOW_BASE=88
@@ -582,63 +589,88 @@ tool_auto_populate() {
     if [[ -f "${tools_file}" ]]; then
         return 0
     fi
-    if [[ ! -f "${SESH_CONFIG}" ]]; then
-        return 0
-    fi
 
-    local windows_json
-    windows_json=$(yq -p toml -o json ".session[] | select(.name == \"${session_name}\") | .windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+    local entries_json=""
+    local source_label=""
+    local entry_mode=""  # "direct" (shunpo config: @name or raw) | "sesh" (bare names, prepend @)
 
-    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
-        local session_path
-        session_path=$(yq -p toml ".session[] | select(.name == \"${session_name}\") | .path // \"\"" "${SESH_CONFIG}" 2>/dev/null) || true
-        if [[ -z "${session_path}" ]]; then
-            session_path=$(tmux display-message -p '#{session_path}' 2>/dev/null) || true
+    # Priority 1: tmux-shunpo config default_tools (decoupled from sesh).
+    if [[ -n "${CFG_DEFAULT_TOOLS_JSON:-}" ]]; then
+        entries_json="${CFG_DEFAULT_TOOLS_JSON}"
+        source_label="tmux-shunpo config default_tools"
+        entry_mode="direct"
+    elif [[ -f "${SESH_CONFIG}" ]]; then
+        # Priority 2: sesh.toml .session[].windows / .wildcard[].windows / .default_session.windows
+        entries_json=$(yq -p toml -o json ".session[] | select(.name == \"${session_name}\") | .windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+
+        if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
+            local session_path
+            session_path=$(yq -p toml ".session[] | select(.name == \"${session_name}\") | .path // \"\"" "${SESH_CONFIG}" 2>/dev/null) || true
+            if [[ -z "${session_path}" ]]; then
+                session_path=$(tmux display-message -p '#{session_path}' 2>/dev/null) || true
+            fi
+            session_path="${session_path/#\~/${HOME}}"
+
+            if [[ -n "${session_path}" ]]; then
+                local num_wildcards
+                num_wildcards=$(yq -p toml '.wildcard | length // 0' "${SESH_CONFIG}" 2>/dev/null) || num_wildcards=0
+                local i
+                for ((i = 0; i < num_wildcards; i++)); do
+                    local pattern
+                    pattern=$(yq -p toml ".wildcard[${i}].pattern // \"\"" "${SESH_CONFIG}" 2>/dev/null) || continue
+                    pattern="${pattern/#\~/${HOME}}"
+                    # shellcheck disable=SC2254
+                    case "${session_path}" in
+                        ${pattern})
+                            entries_json=$(yq -p toml -o json ".wildcard[${i}].windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+                            break
+                            ;;
+                    esac
+                done
+            fi
         fi
-        session_path="${session_path/#\~/${HOME}}"
 
-        if [[ -n "${session_path}" ]]; then
-            local num_wildcards
-            num_wildcards=$(yq -p toml '.wildcard | length // 0' "${SESH_CONFIG}" 2>/dev/null) || num_wildcards=0
-            local i
-            for ((i = 0; i < num_wildcards; i++)); do
-                local pattern
-                pattern=$(yq -p toml ".wildcard[${i}].pattern // \"\"" "${SESH_CONFIG}" 2>/dev/null) || continue
-                pattern="${pattern/#\~/${HOME}}"
-                # shellcheck disable=SC2254
-                case "${session_path}" in
-                    ${pattern})
-                        windows_json=$(yq -p toml -o json ".wildcard[${i}].windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
-                        break
-                        ;;
-                esac
-            done
+        if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
+            entries_json=$(yq -p toml -o json '.default_session.windows // []' "${SESH_CONFIG}" 2>/dev/null) || true
         fi
+
+        source_label="sesh.toml"
+        entry_mode="sesh"
     fi
 
-    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
-        windows_json=$(yq -p toml -o json '.default_session.windows // []' "${SESH_CONFIG}" 2>/dev/null) || true
-    fi
-
-    if [[ -z "${windows_json}" || "${windows_json}" == "[]" ]]; then
+    if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
         return 0
     fi
 
     mkdir -p "$(dirname "${tools_file}")"
-    local content="# auto-generated from sesh.toml"
+    local content="# auto-generated from ${source_label}"
     local slot=1
-    local window_name
-    while IFS= read -r window_name; do
-        [[ -z "${window_name}" ]] && continue
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "${entry}" ]] && continue
         [[ ${slot} -gt 9 ]] && break
-        # Validate window name before writing as @reference (SEC-09)
-        if ! validate_template_name "${window_name}" 2>/dev/null; then
-            continue
+
+        local stored=""
+        if [[ "${entry_mode}" == "direct" ]]; then
+            # tmux-shunpo default_tools: "@name" or raw command.
+            if [[ "${entry}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+                local tmpl="${BASH_REMATCH[1]}"
+                validate_template_name "${tmpl}" 2>/dev/null || continue
+                stored="@${tmpl}"
+            else
+                validate_command "${entry}" 2>/dev/null || continue
+                stored="${entry}"
+            fi
+        else
+            # sesh: bare template name → prepend @ for resolution.
+            validate_template_name "${entry}" 2>/dev/null || continue
+            stored="@${entry}"
         fi
+
         content="${content}
-${slot}: @${window_name}"
+${slot}: ${stored}"
         slot=$((slot + 1))
-    done < <(printf '%s' "${windows_json}" | yq -o tsv '.[]' 2>/dev/null || true)
+    done < <(printf '%s' "${entries_json}" | yq -o tsv '.[]' 2>/dev/null || true)
 
     atomic_write "${tools_file}" "${content}"
 }
@@ -1319,10 +1351,14 @@ Info:
   -v, --version          Show version
 
 Configuration:
-  ~/.config/tmux-shunpo/config.toml    UI/behavior settings
-  ~/.config/sesh/sesh.toml             Session + window definitions (tool templates)
+  ~/.config/tmux-shunpo/config.toml    UI/behavior settings, default_tools
+  ~/.config/sesh/sesh.toml             Session + window templates
   ~/.local/share/tmux-shunpo/marks     Mark storage
   ~/.local/share/tmux-shunpo/tools/    Per-session tool storage
+
+Auto-populate tool slots for new sessions (in precedence order):
+  1. config.toml  default_tools = ["@name", "raw-cmd", ...]
+  2. sesh.toml    [[session]].windows / [[wildcard]].windows / [default_session].windows
 EOF
 }
 
