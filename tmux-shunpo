@@ -45,7 +45,8 @@ CFG_WINDOW_NAME_MAX_LENGTH=20
 CFG_POPUP_WIDTH="80%"
 CFG_POPUP_HEIGHT="70%"
 CFG_FINDER_HEIGHT_PERCENT=50
-CFG_FINDER_PREVIEW_PERCENT=50  # used by search_and_connect
+CFG_FINDER_PREVIEW_PERCENT=50
+CFG_TOOL_WINDOW_PREFIX="⚡"
 
 # =============================================================================
 # CORE UTILITIES
@@ -167,6 +168,7 @@ cfg_load() {
     CFG_POPUP_HEIGHT="70%"
     CFG_FINDER_HEIGHT_PERCENT=50
     CFG_FINDER_PREVIEW_PERCENT=50
+    CFG_TOOL_WINDOW_PREFIX="⚡"
 
     if ! cfg_check_file_safety "${CONFIG_FILE}"; then
         return 1
@@ -198,6 +200,9 @@ cfg_load() {
 
     val=$(yq -p toml '.finder.preview_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
     [[ -n "${val}" ]] && CFG_FINDER_PREVIEW_PERCENT="${val}"
+
+    val=$(yq -p toml '.tool_window_prefix // "⚡"' "${CONFIG_FILE}" 2>/dev/null) || true
+    [[ -n "${val}" ]] && CFG_TOOL_WINDOW_PREFIX="${val}"
 
     # Validate numeric configs — malformed values fall back to defaults
     [[ "${CFG_TOOL_WINDOW_BASE}" =~ ^[0-9]+$ ]] || CFG_TOOL_WINDOW_BASE=88
@@ -857,7 +862,7 @@ navigate_to_tool() {
     else
         [[ "${window_exists}" == true ]] && tmux kill-window -t ":${window_index}" 2>/dev/null || true
 
-        tmux new-window -t ":${window_index}" -n "⚡${name}" -c "${session_path}"
+        tmux new-window -t ":${window_index}" -n "${CFG_TOOL_WINDOW_PREFIX}${name}" -c "${session_path}"
 
         sleep "${CFG_SHELL_INIT_DELAY}"
 

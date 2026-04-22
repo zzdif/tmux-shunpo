@@ -11,6 +11,9 @@ shell_init_delay = 0.2
 # Window name max length for tool windows
 window_name_max_length = 20
 
+# Prefix for tool window names (e.g. "⚡", "@", "")
+tool_window_prefix = "⚡"
+
 # UI Settings for tmux popups
 [ui]
 popup_width = "80%"
