@@ -972,6 +972,7 @@ ui_edit_marks() {
     check_gum
 
     while true; do
+        clear
         gum style --border rounded --padding "0 1" \
             --border-foreground 212 --bold "⚡ Marks"
 
@@ -992,8 +993,17 @@ ui_edit_marks() {
 
         case "${action}" in
             "Set mark")
+                # Find earliest empty slot as default
+                local default_slot=1
+                local s
+                for s in $(seq 1 9); do
+                    if ! parse_marks "${s}" &>/dev/null; then
+                        default_slot="${s}"
+                        break
+                    fi
+                done
                 local slot_choice
-                slot_choice=$(seq 1 9 | gum choose --header "Select slot") || continue
+                slot_choice=$(seq 1 9 | gum choose --header "Select slot" --selected "${default_slot}") || continue
 
                 local method
                 method=$(gum choose --header "Source" \
@@ -1070,6 +1080,7 @@ ui_edit_tools() {
     tool_auto_populate "${session_name}"
 
     while true; do
+        clear
         gum style --border rounded --padding "0 1" \
             --border-foreground 212 --bold "⚡ Tools — ${session_name}"
 
@@ -1095,8 +1106,17 @@ ui_edit_tools() {
 
         case "${action}" in
             "Set tool")
+                # Find earliest empty slot as default
+                local default_slot=1
+                local s
+                for s in $(seq 1 9); do
+                    if ! get_tool "${session_name}" "${s}" &>/dev/null; then
+                        default_slot="${s}"
+                        break
+                    fi
+                done
                 local slot_choice
-                slot_choice=$(seq 1 9 | gum choose --header "Select slot") || continue
+                slot_choice=$(seq 1 9 | gum choose --header "Select slot" --selected "${default_slot}") || continue
 
                 local method
                 method=$(gum choose --header "Source" \
