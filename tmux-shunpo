@@ -803,15 +803,10 @@ generate_window_name() {
     fi
 
     local first_word="${command%% *}"
+    # For @template refs use the template name directly as window name
+    # (more predictable than the resolved command's first word).
     if [[ "${first_word}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
-        local tmpl="${BASH_REMATCH[1]}"
-        local resolved
-        resolved=$(sesh_resolve_window_template "${tmpl}" 2>/dev/null) || true
-        if [[ -n "${resolved}" ]]; then
-            first_word="${resolved%% *}"
-        else
-            first_word="${tmpl}"
-        fi
+        first_word="${BASH_REMATCH[1]}"
     fi
 
     local window_name
