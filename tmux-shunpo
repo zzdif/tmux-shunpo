@@ -989,7 +989,10 @@ ui_edit_marks() {
         printf '\n'
 
         local action
-        action=$(gum choose "Set mark" "Clear mark" "Done") || break
+        action=$(gum choose --label-delimiter=':' \
+            '(s) Set mark:Set mark' \
+            '(c) Clear mark:Clear mark' \
+            '(d) Done:Done') || break
 
         case "${action}" in
             "Set mark")
@@ -1110,7 +1113,10 @@ ui_edit_tools() {
         printf '\n'
 
         local action
-        action=$(gum choose "Set tool" "Clear tool" "Done") || break
+        action=$(gum choose --label-delimiter=':' \
+            '(s) Set tool:Set tool' \
+            '(c) Clear tool:Clear tool' \
+            '(d) Done:Done') || break
 
         case "${action}" in
             "Set tool")
