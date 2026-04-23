@@ -22,8 +22,7 @@ set -euo pipefail
 _ensure_in_path() {
     local bin_path
     bin_path=$(command -v "$1" 2>/dev/null) || return 0
-    local bin_dir
-    bin_dir=$(dirname "${bin_path}")
+    local bin_dir="${bin_path%/*}"  # bash string op instead of dirname fork
     case ":${PATH}:" in
         *":${bin_dir}:"*) ;;
         *) export PATH="${bin_dir}:${PATH}" ;;
@@ -60,6 +59,9 @@ unset local_dir local_base
 mkdir -p "${CONFIG_DIR}" || { echo "Error: cannot create config directory" >&2; exit 1; }
 mkdir -p "${DATA_DIR}" || { echo "Error: cannot create data directory" >&2; exit 1; }
 
+# Cache current UID once (avoids repeated id -u forks in cfg_check_file_safety)
+_CURRENT_UID=$(id -u)
+
 # =============================================================================
 # CONFIGURATION (populated by cfg_load)
 # =============================================================================
@@ -95,6 +97,12 @@ error_exit() {
     local message="$1"
     local exit_code="${2:-1}"
     notify "${message}" "error"
+    # In keybinding context (no TTY, inside tmux), notify already sent
+    # tmux display-message. Exit 0 to prevent tmux run-shell from
+    # showing an ugly "returned 1" full-screen overlay.
+    if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+        exit 0
+    fi
     exit "${exit_code}"
 }
 
@@ -155,25 +163,22 @@ cfg_check_file_safety() {
     local filepath="$1"
     [[ ! -f "${filepath}" ]] && return 0
 
-    local file_owner
-    if stat -f '%u' "${filepath}" &> /dev/null; then
-        file_owner=$(stat -f '%u' "${filepath}")
+    # Single stat call gets both owner uid and permissions (1 fork instead of 4)
+    local stat_info file_owner file_perms
+    if stat_info=$(stat -f '%u %Lp' "${filepath}" 2>/dev/null); then
+        # macOS
+        read -r file_owner file_perms <<< "${stat_info}"
+    elif stat_info=$(stat -c '%u %a' "${filepath}" 2>/dev/null); then
+        # Linux
+        read -r file_owner file_perms <<< "${stat_info}"
     else
-        file_owner=$(stat -c '%u' "${filepath}")
-    fi
-
-    local current_uid
-    current_uid=$(id -u)
-    if [[ "${file_owner}" != "${current_uid}" ]]; then
-        echo "error: config file owned by another user: ${filepath}" >&2
+        echo "error: cannot stat config file: ${filepath}" >&2
         return 1
     fi
 
-    local file_perms
-    if stat -f '%Lp' "${filepath}" &> /dev/null; then
-        file_perms=$(stat -f '%Lp' "${filepath}")
-    else
-        file_perms=$(stat -c '%a' "${filepath}")
+    if [[ "${file_owner}" != "${_CURRENT_UID}" ]]; then
+        echo "error: config file owned by another user: ${filepath}" >&2
+        return 1
     fi
 
     local world_bit="${file_perms:2:1}"
@@ -205,36 +210,41 @@ cfg_load() {
 
     [[ ! -f "${CONFIG_FILE}" ]] && return 0
 
-    local val
-    val=$(yq -p toml '.tool_window_base // 88' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_TOOL_WINDOW_BASE="${val}"
+    # Single yq call extracts all config as KEY=VALUE lines (1 fork instead of 9)
+    local cfg_output
+    cfg_output=$(yq -p toml '
+        "tool_window_base=" + (.tool_window_base // 88 | tostring),
+        "shell_init_delay=" + (.shell_init_delay // 0.2 | tostring),
+        "window_name_max_length=" + (.window_name_max_length // 20 | tostring),
+        "popup_width=" + (.ui.popup_width // "80%"),
+        "popup_height=" + (.ui.popup_height // "70%"),
+        "finder_height_percent=" + (.finder.height_percent // 50 | tostring),
+        "finder_preview_percent=" + (.finder.preview_percent // 50 | tostring),
+        "tool_window_prefix=" + (.tool_window_prefix // "⚡"),
+        "default_tools_json=" + (.default_tools // [] | tojson)
+    ' "${CONFIG_FILE}" 2>/dev/null) || {
+        notify "Failed to parse config: ${CONFIG_FILE}" "error"
+        return 1
+    }
 
-    val=$(yq -p toml '.shell_init_delay // 0.2' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_SHELL_INIT_DELAY="${val}"
-
-    val=$(yq -p toml '.window_name_max_length // 20' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_WINDOW_NAME_MAX_LENGTH="${val}"
-
-    val=$(yq -p toml '.ui.popup_width // "80%"' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_POPUP_WIDTH="${val}"
-
-    val=$(yq -p toml '.ui.popup_height // "70%"' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_POPUP_HEIGHT="${val}"
-
-    val=$(yq -p toml '.finder.height_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_FINDER_HEIGHT_PERCENT="${val}"
-
-    val=$(yq -p toml '.finder.preview_percent // 50' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_FINDER_PREVIEW_PERCENT="${val}"
-
-    val=$(yq -p toml '.tool_window_prefix // "⚡"' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" ]] && CFG_TOOL_WINDOW_PREFIX="${val}"
-
-    # default_tools: array of entries assigned to new sessions.
-    # Each entry: "@name" (resolve via sesh [[window]]) or raw command.
-    # If set, takes priority over sesh-based auto-populate.
-    val=$(yq -p toml -o json '.default_tools // []' "${CONFIG_FILE}" 2>/dev/null) || true
-    [[ -n "${val}" && "${val}" != "[]" && "${val}" != "null" ]] && CFG_DEFAULT_TOOLS_JSON="${val}"
+    # Parse KEY=VALUE lines with whitelisted keys only (SEC-06: no eval/source)
+    local key val
+    while IFS='=' read -r key val; do
+        [[ -z "${key}" ]] && continue
+        case "${key}" in
+            tool_window_base)        CFG_TOOL_WINDOW_BASE="${val}" ;;
+            shell_init_delay)        CFG_SHELL_INIT_DELAY="${val}" ;;
+            window_name_max_length)  CFG_WINDOW_NAME_MAX_LENGTH="${val}" ;;
+            popup_width)             CFG_POPUP_WIDTH="${val}" ;;
+            popup_height)            CFG_POPUP_HEIGHT="${val}" ;;
+            finder_height_percent)   CFG_FINDER_HEIGHT_PERCENT="${val}" ;;
+            finder_preview_percent)  CFG_FINDER_PREVIEW_PERCENT="${val}" ;;
+            tool_window_prefix)      CFG_TOOL_WINDOW_PREFIX="${val}" ;;
+            default_tools_json)
+                [[ -n "${val}" && "${val}" != "[]" && "${val}" != "null" ]] && CFG_DEFAULT_TOOLS_JSON="${val}"
+                ;;
+        esac
+    done <<< "${cfg_output}"
 
     # Validate numeric configs — malformed values fall back to defaults
     [[ "${CFG_TOOL_WINDOW_BASE}" =~ ^[0-9]+$ ]] || CFG_TOOL_WINDOW_BASE=88
@@ -523,8 +533,7 @@ mark_jump_to() {
     local session_ref=""
 
     if [[ -z "${target}" ]]; then
-        [[ -t 0 ]] && echo "Error: no target specified for goto" >&2
-        exit 1
+        error_exit "No target specified for goto"
     fi
 
     if [[ "${target}" =~ ^[0-9]+$ ]]; then
@@ -535,20 +544,22 @@ mark_jump_to() {
                 if [[ ! -d "${check_path}" ]]; then
                     # session_ref is a path that no longer exists
                     mark_remove_invalid "${target}" "${session_ref}" 2>/dev/null || true
-                    notify "Mark ${target} path no longer exists" "error"
-                    return 1
+                    error_exit "Mark ${target} path no longer exists"
                 fi
             fi
             local sesh_err
             if ! sesh_err=$(sesh connect "${session_ref}" 2>&1); then
-                notify "Failed to connect to '${session_ref}': ${sesh_err}" "error"
-                return 1
+                error_exit "Failed to connect to '${session_ref}': ${sesh_err}"
             fi
             return 0
         fi
     fi
 
-    notify "Mark '${target}' not found"
+    # Mark not found — notify and exit clean in keybinding context
+    notify "Mark ${target} not configured (use --marks to edit marks)"
+    if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+        return 0
+    fi
     return 1
 }
 
@@ -808,16 +819,17 @@ generate_window_name() {
     local custom_name="${2:-}"
 
     if [[ -n "${custom_name}" ]]; then
-        local sanitized
-        sanitized=$(printf '%s' "${custom_name}" | tr ' /:' '-' | tr -d '()[]{}|&;')
+        # Pure bash: replace space/:/  with dash, strip unsafe chars
+        local sanitized="${custom_name//[ \/:]/-}"
+        sanitized="${sanitized//[\(\)\[\]\{\}\|\&\;]/}"
         printf '%s\n' "${sanitized}"
         return 0
     fi
 
     local first_word="${command%% *}"
 
-    local window_name
-    window_name=$(printf '%s' "${first_word}" | sed 's/[^a-zA-Z0-9_-]//g')
+    # Pure bash: strip non-alphanumeric/underscore/dash chars (no sed fork)
+    local window_name="${first_word//[^a-zA-Z0-9_-]/}"
     if [[ -z "${window_name}" ]]; then
         echo "window"
     else
@@ -861,8 +873,7 @@ navigate_to_tool() {
         elif [[ "${tmpl}" == "shell" ]]; then
             command="$(tmux show-option -gv default-shell)"
         else
-            notify "Template '@${tmpl}' not found in sesh.toml" "error"
-            return 1
+            error_exit "Template '@${tmpl}' not found in sesh.toml"
         fi
     fi
 
@@ -1370,7 +1381,7 @@ main() {
         notify "config.conf is deprecated. Create config.toml (see --help)" "error"
     fi
 
-    # Dependency checks
+    # Context-aware dependency checks — only check what each command needs
     case "${1:-}" in
         --marks|--tools)
             check_dependencies
@@ -1379,8 +1390,16 @@ main() {
         --search)
             check_dependencies
             ;;
-        --goto|--add|--remove|--reset)
-            check_dependencies
+        --goto)
+            # --goto N needs tmux+sesh; --goto @N needs tmux only
+            # Defer granular check to after arg parsing; check common minimum
+            command_exists tmux || error_exit "missing required tool: tmux>=3.2"
+            ;;
+        --add)
+            command_exists tmux || error_exit "missing required tool: tmux>=3.2"
+            ;;
+        --remove|--reset)
+            command_exists tmux || error_exit "missing required tool: tmux>=3.2"
             ;;
         "")
             : ;; # no deps needed for --help/--version
@@ -1416,6 +1435,7 @@ main() {
             if [[ "$2" =~ ^@([1-9])$ ]]; then
                 navigate_to_tool "${BASH_REMATCH[1]}"
             else
+                command_exists sesh || error_exit "missing required tool: sesh"
                 mark_jump_to "$2"
             fi
             ;;

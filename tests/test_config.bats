@@ -26,14 +26,21 @@ teardown() {
 _mock_yq() {
     cat > "${MOCK_BIN}/yq" <<'MOCK'
 #!/usr/bin/env bash
+# Detect the single-call cfg_load pattern (contains "tool_window_base=" in expression)
 case "$*" in
-    *".tool_window_base // 88"*) echo "77" ;;
-    *".shell_init_delay // 0.2"*) echo "0.5" ;;
-    *".window_name_max_length // 20"*) echo "15" ;;
-    *".ui.popup_width"*) echo "70%" ;;
-    *".ui.popup_height"*) echo "60%" ;;
-    *".finder.height_percent"*) echo "40" ;;
-    *".finder.preview_percent"*) echo "45" ;;
+    *"tool_window_base="*)
+        # Single yq call for cfg_load — return all KEY=VALUE lines
+        printf '%s\n' \
+            'tool_window_base=77' \
+            'shell_init_delay=0.5' \
+            'window_name_max_length=15' \
+            'popup_width=70%' \
+            'popup_height=60%' \
+            'finder_height_percent=40' \
+            'finder_preview_percent=45' \
+            'tool_window_prefix=⚡' \
+            'default_tools_json=[]'
+        ;;
     *) ;;
 esac
 MOCK
