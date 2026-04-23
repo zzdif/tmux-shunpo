@@ -916,10 +916,11 @@ navigate_to_tool() {
         case "${current_cmd}" in
             bash|zsh|sh|fish)
                 if [[ -n "${pane_pid}" ]]; then
-                    # pgrep -P | wc -l = 2 forks; bash trim avoids tr fork
-                    # (macOS pgrep lacks -c flag)
+                    # pgrep -P exits 1 when no children; need set +e for pipefail
                     local child_count
+                    set +e
                     child_count=$(pgrep -P "${pane_pid}" 2>/dev/null | wc -l)
+                    set -e
                     child_count="${child_count// /}"  # trim whitespace (macOS wc pads)
                     [[ "${child_count}" -eq 0 ]] && is_idle=true
                 fi
