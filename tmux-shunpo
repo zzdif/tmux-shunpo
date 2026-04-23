@@ -49,15 +49,19 @@ DATA_DIR="${DATA_DIR:-${HOME}/.local/share/tmux-shunpo}"
 MARKS_FILE="${MARKS_FILE:-${DATA_DIR}/marks}"
 SESH_CONFIG="${SESH_CONFIG:-${XDG_CONFIG_HOME:-${HOME}/.config}/sesh/sesh.toml}"
 
-# Resolve script path once for popup re-invocation
-# Resolve script path once for popup re-invocation
-local_dir="$(dirname "${BASH_SOURCE[0]}" || true)"
-local_base="$(basename "${BASH_SOURCE[0]}" || true)"
-SCRIPT_PATH="$(cd "${local_dir}" && pwd)/${local_base}"
-unset local_dir local_base
+# Lazy script path resolution — only computed when --marks/--tools need popup re-invoke
+SCRIPT_PATH=""
+_get_script_path() {
+    if [[ -z "${SCRIPT_PATH}" ]]; then
+        local local_dir="${BASH_SOURCE[0]%/*}"
+        local local_base="${BASH_SOURCE[0]##*/}"
+        SCRIPT_PATH="$(cd "${local_dir}" && pwd)/${local_base}"
+    fi
+    printf '%s' "${SCRIPT_PATH}"
+}
 
-mkdir -p "${CONFIG_DIR}" || { echo "Error: cannot create config directory" >&2; exit 1; }
-mkdir -p "${DATA_DIR}" || { echo "Error: cannot create data directory" >&2; exit 1; }
+[[ -d "${CONFIG_DIR}" ]] || mkdir -p "${CONFIG_DIR}" || { echo "Error: cannot create config directory" >&2; exit 1; }
+[[ -d "${DATA_DIR}" ]] || mkdir -p "${DATA_DIR}" || { echo "Error: cannot create data directory" >&2; exit 1; }
 
 # Cache current UID once (avoids repeated id -u forks in cfg_check_file_safety)
 _CURRENT_UID=$(id -u)
@@ -694,7 +698,7 @@ get_tool() {
     validate_range "${slot}" 1 9 "Tool slot must be between 1-9"
 
     local tools_dir="${DATA_DIR}/tools"
-    mkdir -p "${tools_dir}" 2>/dev/null || error_exit "Cannot create tools directory: ${tools_dir}"
+    [[ -d "${tools_dir}" ]] || mkdir -p "${tools_dir}" 2>/dev/null || error_exit "Cannot create tools directory: ${tools_dir}"
 
     local tools_file="${tools_dir}/${session_name}"
 
@@ -714,7 +718,7 @@ get_tool() {
             command="${command%"${command##*[![:space:]]}"}"
             if [[ -n "${command}" ]]; then
                 local resolved_command="${command}"
-                # Resolve @template → actual command for window naming
+                # Resolve @template → actual command for window naming + execution
                 if [[ "${command}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                     local tmpl="${BASH_REMATCH[1]}"
                     local resolved
@@ -727,7 +731,9 @@ get_tool() {
                 fi
                 local window_name
                 window_name=$(generate_window_name "${resolved_command}")
-                echo "${window_name}:::${command}"
+                # Output: name:::raw_command:::resolved_command
+                # resolved_command lets caller skip duplicate yq resolution
+                echo "${window_name}:::${command}:::${resolved_command}"
                 found=true
             fi
             break
@@ -861,16 +867,14 @@ navigate_to_tool() {
     fi
 
     local name="${tool_data%%:::*}"
-    local command="${tool_data#*:::}"
+    local rest="${tool_data#*:::}"
+    local raw_command="${rest%%:::*}"
+    local command="${rest#*:::}"  # pre-resolved by get_tool (no duplicate yq call)
 
-    # Expand @template to real command for execution
-    if [[ "${command}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+    # Handle unresolved templates (shell special case or missing template)
+    if [[ "${raw_command}" =~ ^@([a-zA-Z0-9_-]+)$ && "${command}" == "${raw_command}" ]]; then
         local tmpl="${BASH_REMATCH[1]}"
-        local resolved
-        resolved=$(sesh_resolve_window_template "${tmpl}" 2>/dev/null) || true
-        if [[ -n "${resolved}" ]]; then
-            command="${resolved}"
-        elif [[ "${tmpl}" == "shell" ]]; then
+        if [[ "${tmpl}" == "shell" ]]; then
             command="$(tmux show-option -gv default-shell)"
         else
             error_exit "Template '@${tmpl}' not found in sesh.toml"
@@ -897,8 +901,7 @@ navigate_to_tool() {
 
     if [[ -n "${window_info}" ]]; then
         window_exists=true
-        local pane_count
-        pane_count=$(echo "${window_info}" | cut -d' ' -f2)
+        local pane_count="${window_info##* }"  # bash string op instead of echo|cut fork
         [[ "${pane_count}" -gt 0 ]] && has_panes=true
     fi
 
@@ -913,10 +916,9 @@ navigate_to_tool() {
         case "${current_cmd}" in
             bash|zsh|sh|fish)
                 if [[ -n "${pane_pid}" ]]; then
-                    set +e
+                    # pgrep -cP = count children in 1 fork (instead of pgrep|wc|tr = 3)
                     local child_count
-                    child_count=$(pgrep -P "${pane_pid}" 2>/dev/null | wc -l | tr -d ' ')
-                    set -e
+                    child_count=$(pgrep -cP "${pane_pid}" 2>/dev/null) || child_count=0
                     [[ "${child_count}" -eq 0 ]] && is_idle=true
                 fi
                 ;;
@@ -1157,7 +1159,8 @@ ui_edit_tools() {
         for slot in $(seq 1 9); do
             local tool_data
             if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
-                local cmd="${tool_data#*:::}"
+                local rest="${tool_data#*:::}"
+                local cmd="${rest%%:::*}"
                 if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                     local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
                     printf '  @%d  %s (→ %s)\n' "${slot}" "${cmd}" "${expanded}"
@@ -1182,7 +1185,8 @@ ui_edit_tools() {
                 for s in $(seq 1 9); do
                     local tool_data
                     if tool_data=$(get_tool "${session_name}" "${s}" 2>/dev/null); then
-                        local cmd="${tool_data#*:::}"
+                        local rest="${tool_data#*:::}"
+                        local cmd="${rest%%:::*}"
                         if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                             local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
                             choices+=("${s}: ${cmd} (→ ${expanded})")
@@ -1225,7 +1229,8 @@ ui_edit_tools() {
                     "Enter command manually")
                         local current_cmd=""
                         if tool_data=$(get_tool "${session_name}" "${slot_choice}" 2>/dev/null); then
-                            current_cmd="${tool_data#*:::}"
+                            local rest="${tool_data#*:::}"
+                            current_cmd="${rest%%:::*}"
                         fi
                         new_cmd=$(gum input \
                             --header "Command for slot @${slot_choice}" \
@@ -1252,7 +1257,8 @@ ui_edit_tools() {
                 local -a filled=()
                 for slot in $(seq 1 9); do
                     if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
-                        filled+=("@${slot}: ${tool_data#*:::}")
+                        local rest="${tool_data#*:::}"
+                        filled+=("@${slot}: ${rest%%:::*}")
                     fi
                 done
                 if [[ ${#filled[@]} -eq 0 ]]; then
@@ -1450,16 +1456,20 @@ main() {
             ;;
         --marks)
             if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+                local script_path
+                script_path=$(_get_script_path)
                 tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
-                    "${SCRIPT_PATH} --marks"
+                    "${script_path} --marks"
                 exit 0
             fi
             ui_edit_marks
             ;;
         --tools)
             if [[ ! -t 0 && -n "${TMUX:-}" ]]; then
+                local script_path
+                script_path=$(_get_script_path)
                 tmux display-popup -E -w "${CFG_POPUP_WIDTH}" -h "${CFG_POPUP_HEIGHT}" \
-                    "${SCRIPT_PATH} --tools"
+                    "${script_path} --tools"
                 exit 0
             fi
             ui_edit_tools

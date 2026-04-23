@@ -197,8 +197,8 @@ MOCK
     tool_set "test-session" 1 "@editor"
     run get_tool "test-session" 1
     assert_success
-    # Format: name:::command. Name is before ':::', command is raw @editor.
-    assert_output "nvim:::@editor"
+    # Format: name:::raw_command:::resolved_command
+    assert_output "nvim:::@editor:::nvim ."
 }
 
 @test "get_tool @template strips command args for window name" {
@@ -207,7 +207,7 @@ MOCK
     tool_set "test-session" 2 "@devserver"
     run get_tool "test-session" 2
     assert_success
-    assert_output "cargo:::@devserver"
+    assert_output "cargo:::@devserver:::cargo watch -x run"
 }
 
 @test "get_tool @template uses command name not template name" {
@@ -216,7 +216,7 @@ MOCK
     tool_set "test-session" 3 "@agent"
     run get_tool "test-session" 3
     assert_success
-    assert_output "pi:::@agent"
+    assert_output "pi:::@agent:::pi"
 }
 
 @test "get_tool @shell without startup_script uses 'shell' as window name" {
@@ -225,7 +225,7 @@ MOCK
     tool_set "test-session" 4 "@shell"
     run get_tool "test-session" 4
     assert_success
-    assert_output "shell:::@shell"
+    assert_output "shell:::@shell:::shell"
 }
 
 @test "get_tool unknown @template falls back to stripped template name" {
@@ -235,7 +235,7 @@ MOCK
     tool_set "test-session" 5 "@nonexistent"
     run get_tool "test-session" 5
     assert_success
-    assert_output "nonexistent:::@nonexistent"
+    assert_output "nonexistent:::@nonexistent:::@nonexistent"
 }
 
 @test "get_tool @template with no sesh.toml falls back to stripped template name" {
@@ -244,7 +244,7 @@ MOCK
     tool_set "test-session" 1 "@editor"
     run get_tool "test-session" 1
     assert_success
-    assert_output "editor:::@editor"
+    assert_output "editor:::@editor:::@editor"
 }
 
 @test "get_tool @template sanitizes malicious startup_script for window name" {
@@ -287,5 +287,5 @@ TOML
     tool_set "test-session" 1 "cargo test"
     run get_tool "test-session" 1
     assert_success
-    assert_output "cargo:::cargo test"
+    assert_output "cargo:::cargo test:::cargo test"
 }
