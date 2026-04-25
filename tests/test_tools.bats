@@ -27,15 +27,21 @@ _mock_yq() {
     cat > "${MOCK_BIN}/yq" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
-    *".session[] | select(.name == \"test-project\") | .windows"*) echo '["editor","tests"]' ;;
-    *".session[] | select(.name == \"test-project\") | .path"*) echo '~/Code/test' ;;
-    *".wildcard"*) echo '2' ;;
-    *".wildcard[0].pattern"*) echo '~/Code/*' ;;
-    *".wildcard[0].windows"*) echo '["editor","devserver","shell"]' ;;
-    *".wildcard[1].pattern"*) echo '' ;;
-    *".default_session.windows"*) echo '["editor","shell"]' ;;
-    *".window[] | select(.name == \"editor\") | .startup_script"*) echo 'nvim .' ;;
-    *"-o tsv .[]"*) echo -e "editor\nshell" ;;
+    # sesh_load_sessions: session list TSV
+    *session[]*join*) echo $'test-project\t~/Code/test\teditor,tests' ;;
+    # sesh_load_sessions: wildcard list TSV
+    *wildcard[]*join*) echo $'~/Code/*\teditor,devserver,shell' ;;
+    # sesh_load_sessions: default windows comma-joined
+    *default_session.windows*join*) echo 'editor,shell' ;;
+    # sesh_load_sessions: wildcard count (fallback)
+    *wildcard*length*) echo '1' ;;
+    # sesh_load_templates: window TSV
+    *window[]*name*startup_script*tsv*) printf 'editor\tnvim .\nshell\t\ntests\tbats tests/\ndevserver\tcargo watch -x run\nagent\tpi\n' ;;
+    # tool_auto_populate: JSON array to lines
+    *-o*tsv*.[]*) printf 'editor\nshell\n' ;;
+    # cfg_load patterns
+    *tool_window_base*) echo 'tool_window_base=88' ;;
+    *shell_init_delay*) echo 'shell_init_delay=0.2' ;;
     *) echo "" ;;
 esac
 MOCK
@@ -123,8 +129,10 @@ MOCK
     cat > "${MOCK_BIN}/yq" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
-    *".default_session.windows"*) echo '["a","b","c","d","e","f","g","h","i","j"]' ;;
-    *"-o tsv .[]"*) echo -e "a\nb\nc\nd\ne\nf\ng\nh\ni\nj" ;;
+    *default_session.windows*join*) echo 'a,b,c,d,e,f,g,h,i,j' ;;
+    *session[]*join*) echo '' ;;
+    *wildcard[]*join*) echo '' ;;
+    *window[]*tsv*) printf 'a\tb\nc\td\ne\tf\ng\th\ni\tj\n' ;;
     *) echo "" ;;
 esac
 MOCK
@@ -143,8 +151,9 @@ MOCK
     cat > "${MOCK_BIN}/yq" <<'MOCK'
 #!/usr/bin/env bash
 case "$*" in
-    *".default_session.windows"*) echo '["valid","evil;rm","ok"]' ;;
-    *"-o tsv .[]"*) printf 'valid\nevil;rm\nok\n' ;;
+    *default_session.windows*join*) echo 'valid,evil;rm,ok' ;;
+    *session[]*join*) echo '' ;;
+    *wildcard[]*join*) echo '' ;;
     *) echo "" ;;
 esac
 MOCK

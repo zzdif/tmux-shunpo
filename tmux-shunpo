@@ -66,12 +66,22 @@ _get_script_path() {
 # Cache current UID once (avoids repeated id -u forks in cfg_check_file_safety)
 _CURRENT_UID=$(id -u)
 
+# Sesh config caches (loaded once per invocation, avoids repeated yq forks)
+declare -gA _SESH_TEMPLATES=()
+declare -gA _SESH_SESSION_WINDOWS=()
+declare -gA _SESH_SESSION_PATHS=()
+declare -ga _SESH_WILDCARD_PATTERNS=()
+declare -gA _SESH_WILDCARD_WINDOWS=()
+_SESH_DEFAULT_WINDOWS=""
+_SESH_TEMPLATES_LOADED=false
+_SESH_SESSIONS_LOADED=false
+
 # =============================================================================
 # CONFIGURATION (populated by cfg_load)
 # =============================================================================
 
 CFG_TOOL_WINDOW_BASE=88
-CFG_SHELL_INIT_DELAY=0.2
+CFG_SHELL_INIT_DELAY=0.1
 CFG_WINDOW_NAME_MAX_LENGTH=20
 CFG_POPUP_WIDTH="80%"
 CFG_POPUP_HEIGHT="70%"
@@ -128,7 +138,7 @@ atomic_write() {
     local file_path="$1"
     local content="$2"
     local temp_file="${file_path}.tmp.$$"
-    mkdir -p "$(dirname "${file_path}")" || error_exit "Cannot create directory for: ${file_path}"
+    mkdir -p "${file_path%/*}" || error_exit "Cannot create directory for: ${file_path}"
     printf '%s\n' "${content}" > "${temp_file}" || error_exit "Cannot write to temp file: ${temp_file}"
     mv -- "${temp_file}" "${file_path}" || { rm -f "${temp_file}"; error_exit "Cannot move temp file to: ${file_path}"; }
 }
@@ -252,10 +262,69 @@ cfg_load() {
 
     # Validate numeric configs — malformed values fall back to defaults
     [[ "${CFG_TOOL_WINDOW_BASE}" =~ ^[0-9]+$ ]] || CFG_TOOL_WINDOW_BASE=88
-    [[ "${CFG_SHELL_INIT_DELAY}" =~ ^[0-9]+\.?[0-9]*$ ]] || CFG_SHELL_INIT_DELAY=0.2
+    [[ "${CFG_SHELL_INIT_DELAY}" =~ ^[0-9]+\.?[0-9]*$ ]] || CFG_SHELL_INIT_DELAY=0.1
     [[ "${CFG_WINDOW_NAME_MAX_LENGTH}" =~ ^[0-9]+$ ]] || CFG_WINDOW_NAME_MAX_LENGTH=20
     [[ "${CFG_FINDER_HEIGHT_PERCENT}" =~ ^[0-9]+$ ]] || CFG_FINDER_HEIGHT_PERCENT=50
     [[ "${CFG_FINDER_PREVIEW_PERCENT}" =~ ^[0-9]+$ ]] || CFG_FINDER_PREVIEW_PERCENT=50
+}
+
+# =============================================================================
+# SESH CONFIG CACHE (avoids repeated yq forks)
+# =============================================================================
+
+# Load sesh window templates into _SESH_TEMPLATES (1 yq fork, cached)
+_sesh_load_templates() {
+    if [[ "${_SESH_TEMPLATES_LOADED}" == true ]]; then
+        return 0
+    fi
+    _SESH_TEMPLATES=()
+    if [[ ! -f "${SESH_CONFIG}" ]]; then
+        _SESH_TEMPLATES_LOADED=true
+        return 0
+    fi
+    local out name command
+    out=$(yq -p toml '.window[] | [.name, (.startup_script // "")] | @tsv' "${SESH_CONFIG}" 2>/dev/null) || true
+    while IFS=$'\t' read -r name command; do
+        [[ -n "${name}" ]] && _SESH_TEMPLATES["${name}"]="${command}"
+    done <<< "${out}"
+    _SESH_TEMPLATES_LOADED=true
+}
+
+# Load sesh session/wildcard/default data into caches (2 yq forks, cached)
+_sesh_load_sessions() {
+    if [[ "${_SESH_SESSIONS_LOADED}" == true ]]; then
+        return 0
+    fi
+    _SESH_SESSION_WINDOWS=()
+    _SESH_SESSION_PATHS=()
+    _SESH_WILDCARD_PATTERNS=()
+    _SESH_WILDCARD_WINDOWS=()
+    _SESH_DEFAULT_WINDOWS=""
+
+    if [[ ! -f "${SESH_CONFIG}" ]]; then
+        _SESH_SESSIONS_LOADED=true
+        return 0
+    fi
+
+    local sessions_tsv name path windows
+    sessions_tsv=$(yq -p toml '.session[] | [.name, (.path // ""), ((.windows // []) | join(","))] | @tsv' "${SESH_CONFIG}" 2>/dev/null) || true
+    while IFS=$'\t' read -r name path windows; do
+        [[ -n "${name}" ]] || continue
+        _SESH_SESSION_PATHS["${name}"]="${path}"
+        _SESH_SESSION_WINDOWS["${name}"]="${windows}"
+    done <<< "${sessions_tsv}"
+
+    local wildcards_tsv pattern
+    wildcards_tsv=$(yq -p toml '.wildcard[] | [.pattern, ((.windows // []) | join(","))] | @tsv' "${SESH_CONFIG}" 2>/dev/null) || true
+    while IFS=$'\t' read -r pattern windows; do
+        [[ -n "${pattern}" ]] || continue
+        _SESH_WILDCARD_PATTERNS+=("${pattern}")
+        _SESH_WILDCARD_WINDOWS["${pattern}"]="${windows}"
+    done <<< "${wildcards_tsv}"
+
+    _SESH_DEFAULT_WINDOWS=$(yq -p toml '(.default_session.windows // []) | join(",")' "${SESH_CONFIG}" 2>/dev/null) || true
+
+    _SESH_SESSIONS_LOADED=true
 }
 
 # =============================================================================
@@ -370,7 +439,7 @@ mark_set() {
     content="# Marks for tmux-shunpo
 # Format: SLOT: PATH or SESSION"
     local i
-    for i in $(seq 1 9); do
+    for i in {1..9}; do
         if [[ -n "${marks[${i}]:-}" ]]; then
             content="${content}
 ${i}: ${marks[${i}]}"
@@ -469,7 +538,7 @@ mark_remove() {
 
     local content="# Marks for tmux-shunpo"
     local i
-    for i in $(seq 1 9); do
+    for i in {1..9}; do
         if [[ -n "${marks[${i}]:-}" ]]; then
             content="${content}
 ${i}: ${marks[${i}]}"
@@ -572,24 +641,22 @@ mark_jump_to() {
 # =============================================================================
 
 config_load_tool_templates() {
-    if [[ ! -f "${SESH_CONFIG}" ]]; then
-        return 0
-    fi
-    local out
-    out=$(yq -p toml '.window[] | [.name, .startup_script // ""] | @tsv' "${SESH_CONFIG}" 2>/dev/null) || true
-    [[ -z "${out}" ]] && return 0
-    printf '%s\n' "${out}" | while IFS=$'\t' read -r name command; do
-        [[ -n "${name}" && -n "${command}" ]] && echo "${name}:::${command}"
+    _sesh_load_templates
+    local name
+    for name in "${!_SESH_TEMPLATES[@]}"; do
+        [[ -n "${_SESH_TEMPLATES[${name}]:-}" ]] && echo "${name}:::${_SESH_TEMPLATES[${name}]}"
     done
 }
 
 sesh_resolve_window_template() {
     local template_name="$1"
     validate_template_name "${template_name}" || return 1
-    if [[ ! -f "${SESH_CONFIG}" ]]; then
-        return 1
+    _sesh_load_templates
+    if [[ -n "${_SESH_TEMPLATES[${template_name}]:-}" ]]; then
+        echo "${_SESH_TEMPLATES[${template_name}]}"
+        return 0
     fi
-    yq -p toml ".window[] | select(.name == \"${template_name}\") | .startup_script // \"\"" "${SESH_CONFIG}" 2>/dev/null
+    return 1
 }
 
 # =============================================================================
@@ -605,69 +672,72 @@ tool_auto_populate() {
         return 0
     fi
 
-    local entries_json=""
+    local entries_comma=""  # comma-separated window names
     local source_label=""
-    local entry_mode=""  # "direct" (shunpo config: @name or raw) | "sesh" (bare names, prepend @)
+    local entry_mode=""  # "direct" (shunpo config) | "sesh" (bare names, prepend @)
 
-    # Priority 1: tmux-shunpo config default_tools (decoupled from sesh).
+    # Priority 1: tmux-shunpo config default_tools (in memory, no forks)
     if [[ -n "${CFG_DEFAULT_TOOLS_JSON:-}" ]]; then
-        entries_json="${CFG_DEFAULT_TOOLS_JSON}"
+        # Parse JSON array to comma-separated string
+        entries_comma=$(printf '%s' "${CFG_DEFAULT_TOOLS_JSON}" | yq -o csv '.[]' 2>/dev/null | tr '\n' ',' | sed 's/,$//') || entries_comma=""
         source_label="tmux-shunpo config default_tools"
         entry_mode="direct"
-    elif [[ -f "${SESH_CONFIG}" ]]; then
-        # Priority 2: sesh.toml .session[].windows / .wildcard[].windows / .default_session.windows
-        entries_json=$(yq -p toml -o json ".session[] | select(.name == \"${session_name}\") | .windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+    else
+        # Priority 2-4: sesh session → wildcard → default (cached, 0 yq forks after first load)
+        _sesh_load_sessions
 
-        if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
-            local session_path
-            session_path=$(yq -p toml ".session[] | select(.name == \"${session_name}\") | .path // \"\"" "${SESH_CONFIG}" 2>/dev/null) || true
+        if [[ -n "${_SESH_SESSION_WINDOWS[${session_name}]:-}" ]]; then
+            # Priority 2: session name match
+            entries_comma="${_SESH_SESSION_WINDOWS[${session_name}]}"
+            source_label="sesh.toml session=${session_name}"
+            entry_mode="sesh"
+        else
+            # Priority 3: wildcard match (bash glob, no yq)
+            local session_path="${_SESH_SESSION_PATHS[${session_name}]:-}"
             if [[ -z "${session_path}" ]]; then
                 session_path=$(tmux display-message -p '#{session_path}' 2>/dev/null) || true
             fi
             session_path="${session_path/#\~/${HOME}}"
 
             if [[ -n "${session_path}" ]]; then
-                local num_wildcards
-                num_wildcards=$(yq -p toml '.wildcard | length // 0' "${SESH_CONFIG}" 2>/dev/null) || num_wildcards=0
-                local i
-                for ((i = 0; i < num_wildcards; i++)); do
-                    local pattern
-                    pattern=$(yq -p toml ".wildcard[${i}].pattern // \"\"" "${SESH_CONFIG}" 2>/dev/null) || continue
-                    pattern="${pattern/#\~/${HOME}}"
+                local pattern
+                for pattern in "${_SESH_WILDCARD_PATTERNS[@]}"; do
+                    local expanded_pattern="${pattern/#\~/${HOME}}"
                     # shellcheck disable=SC2254
                     case "${session_path}" in
-                        ${pattern})
-                            entries_json=$(yq -p toml -o json ".wildcard[${i}].windows // []" "${SESH_CONFIG}" 2>/dev/null) || true
+                        ${expanded_pattern})
+                            entries_comma="${_SESH_WILDCARD_WINDOWS[${pattern}]}"
+                            source_label="sesh.toml wildcard=${pattern}"
+                            entry_mode="sesh"
                             break
                             ;;
                     esac
                 done
             fi
-        fi
 
-        if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
-            entries_json=$(yq -p toml -o json '.default_session.windows // []' "${SESH_CONFIG}" 2>/dev/null) || true
+            # Priority 4: default session
+            if [[ -z "${entries_comma}" && -n "${_SESH_DEFAULT_WINDOWS}" ]]; then
+                entries_comma="${_SESH_DEFAULT_WINDOWS}"
+                source_label="sesh.toml default_session"
+                entry_mode="sesh"
+            fi
         fi
-
-        source_label="sesh.toml"
-        entry_mode="sesh"
     fi
 
-    if [[ -z "${entries_json}" || "${entries_json}" == "[]" ]]; then
+    if [[ -z "${entries_comma}" ]]; then
         return 0
     fi
 
-    mkdir -p "$(dirname "${tools_file}")"
+    mkdir -p "${tools_file%/*}"
     local content="# auto-generated from ${source_label}"
-    local slot=1
-    local entry
-    while IFS= read -r entry; do
+    local slot=1 entry
+    local IFS=','
+    for entry in ${entries_comma}; do
         [[ -z "${entry}" ]] && continue
         [[ ${slot} -gt 9 ]] && break
 
         local stored=""
         if [[ "${entry_mode}" == "direct" ]]; then
-            # tmux-shunpo default_tools: "@name" or raw command.
             if [[ "${entry}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                 local tmpl="${BASH_REMATCH[1]}"
                 validate_template_name "${tmpl}" 2>/dev/null || continue
@@ -677,7 +747,7 @@ tool_auto_populate() {
                 stored="${entry}"
             fi
         else
-            # sesh: bare template name → prepend @ for resolution.
+            # sesh: bare template name → prepend @ for resolution
             validate_template_name "${entry}" 2>/dev/null || continue
             stored="@${entry}"
         fi
@@ -685,7 +755,8 @@ tool_auto_populate() {
         content="${content}
 ${slot}: ${stored}"
         slot=$((slot + 1))
-    done < <(printf '%s' "${entries_json}" | yq -o tsv '.[]' 2>/dev/null || true)
+    done
+    unset IFS
 
     atomic_write "${tools_file}" "${content}"
 }
@@ -752,7 +823,7 @@ tool_set() {
     validate_range "${slot}" 1 9 "Slot must be between 1-9"
 
     local tools_file="${DATA_DIR}/tools/${session_name}"
-    mkdir -p "$(dirname "${tools_file}")" || error_exit "Cannot create tools directory"
+    mkdir -p "${tools_file%/*}" || error_exit "Cannot create tools directory"
 
     local -A tools
     local line
@@ -773,7 +844,7 @@ tool_set() {
 
     local content="# Tools for session: ${session_name}"
     local i
-    for i in $(seq 1 9); do
+    for i in {1..9}; do
         if [[ -n "${tools[${i}]:-}" ]]; then
             content="${content}
 ${i}: ${tools[${i}]}"
@@ -810,7 +881,7 @@ tool_remove() {
 
     local content="# Tools for session: ${session_name}"
     local i
-    for i in $(seq 1 9); do
+    for i in {1..9}; do
         if [[ -n "${tools[${i}]:-}" ]]; then
             content="${content}
 ${i}: ${tools[${i}]}"
@@ -936,8 +1007,19 @@ navigate_to_tool() {
     else
         [[ "${window_exists}" == true ]] && tmux kill-window -t ":${window_index}" 2>/dev/null || true
 
-        tmux new-window -t ":${window_index}" -n "${CFG_TOOL_WINDOW_PREFIX}${name}" -c "${session_path}"
-
+        # Poll for shell readiness instead of fixed sleep.
+        # Most shells start in <50ms; polling catches them faster than sleeping.
+        local _poll_attempt=0
+        while [[ ${_poll_attempt} -lt 20 ]]; do
+            local _pane_cmd
+            _pane_cmd=$(tmux display-message -p -t ":${window_index}.0" '#{pane_current_command}' 2>/dev/null) || break
+            case "${_pane_cmd}" in
+                bash|zsh|sh|fish) break ;;
+            esac
+            sleep 0.01
+            _poll_attempt=$((_poll_attempt + 1))
+        done
+        # Brief settle delay for prompt init (Starship etc.)
         sleep "${CFG_SHELL_INIT_DELAY}"
 
         if [[ "${is_shell_only}" == false ]]; then
@@ -1037,17 +1119,30 @@ search_and_connect() {
 ui_edit_marks() {
     check_gum
 
+    local -A marks
     while true; do
+        # Read all marks once per display refresh (1 file read vs 9 parse_marks calls)
+        marks=()
+        local mark_line
+        while IFS= read -r mark_line; do
+            [[ -z "${mark_line}" || "${mark_line}" =~ ^[[:space:]]*# ]] && continue
+            if [[ "${mark_line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+                local m_slot="${BASH_REMATCH[1]}"
+                local m_val="${BASH_REMATCH[2]}"
+                m_val="${m_val#"${m_val%%[![:space:]]*}"}"
+                m_val="${m_val%"${m_val##*[![:space:]]}"}"
+                [[ -n "${m_val}" && "${m_slot}" -ge 1 && "${m_slot}" -le 9 ]] && marks["${m_slot}"]="${m_val}"
+            fi
+        done < "${MARKS_FILE}" 2>/dev/null || true
+
         clear
         gum style --border rounded --padding "0 1" \
             --border-foreground 212 --bold "${CFG_TOOL_WINDOW_PREFIX} Marks"
 
         local slot
-        for slot in $(seq 1 9); do
-            local value
-            value=$(parse_marks "${slot}" 2>/dev/null) || value=""
-            if [[ -n "${value}" ]]; then
-                printf '  %d  %s\n' "${slot}" "${value}"
+        for slot in {1..9}; do
+            if [[ -n "${marks[${slot}]:-}" ]]; then
+                printf '  %d  %s\n' "${slot}" "${marks[${slot}]}"
             else
                 printf '  %d  %s\n' "${slot}" "(empty)"
             fi
@@ -1059,13 +1154,12 @@ ui_edit_marks() {
 
         case "${action}" in
             "Set mark")
-                # Build rich slot list (same info as main display) with cursor on earliest empty
-                local choices=()
+                # Build rich slot list using cached marks (no extra file reads)
+                local -a choices=()
                 local default_choice=""
                 local s
-                for s in $(seq 1 9); do
-                    local val
-                    val=$(parse_marks "${s}" 2>/dev/null) || val=""
+                for s in {1..9}; do
+                    local val="${marks[${s}]:-}"
                     if [[ -n "${val}" ]]; then
                         choices+=("${s}: ${val}")
                     else
@@ -1092,8 +1186,7 @@ ui_edit_marks() {
                             --placeholder "Filter...") || continue
                         ;;
                     "Enter manually")
-                        local current
-                        current=$(parse_marks "${slot_choice}" 2>/dev/null) || current=""
+                        local current="${marks[${slot_choice}]:-}"
                         new_value=$(gum input \
                             --header "Session name or path for slot ${slot_choice}" \
                             --placeholder "session-name or ~/path" \
@@ -1110,10 +1203,10 @@ ui_edit_marks() {
                 ;;
             "Clear mark")
                 local -a filled=()
-                for slot in $(seq 1 9); do
-                    local val
-                    val=$(parse_marks "${slot}" 2>/dev/null) || continue
-                    filled+=("${slot}: ${val}")
+                for slot in {1..9}; do
+                    if [[ -n "${marks[${slot}]:-}" ]]; then
+                        filled+=("${slot}: ${marks[${slot}]}")
+                    fi
                 done
                 if [[ ${#filled[@]} -eq 0 ]]; then
                     gum style --foreground 208 "No marks to clear"
@@ -1144,26 +1237,56 @@ ui_edit_tools() {
 
     validate_session_name "${session_name}" || error_exit "Invalid session name: ${session_name}"
 
+    # Load templates once (cached, no yq fork after first load)
+    _sesh_load_templates
     local -A templates
-    while IFS= read -r line; do
-        if [[ "${line}" =~ ^([^:]+):::(.+)$ ]]; then
-            templates["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
-        fi
-    done < <(config_load_tool_templates || true)
+    for name in "${!_SESH_TEMPLATES[@]}"; do
+        templates["${name}"]="${_SESH_TEMPLATES[${name}]}"
+    done
 
     tool_auto_populate "${session_name}"
 
+    # Read tools once per loop iteration (1 file read vs 9 get_tool calls)
+    local -A tool_cmds
     while true; do
+        # Refresh tool data from file (1 read vs 9 get_tool calls)
+        tool_cmds=()
+        local tools_file="${DATA_DIR}/tools/${session_name}"
+        if [[ -f "${tools_file}" ]]; then
+            local t_line t_slot t_cmd
+            while IFS= read -r t_line; do
+                [[ -z "${t_line}" || "${t_line}" =~ ^[[:space:]]*# ]] && continue
+                if [[ "${t_line}" =~ ^([0-9]+):[[:space:]]*(.+)$ ]]; then
+                    t_slot="${BASH_REMATCH[1]}"
+                    t_cmd="${BASH_REMATCH[2]}"
+                    t_cmd="${t_cmd#"${t_cmd%%[![:space:]]*}"}"
+                    t_cmd="${t_cmd%"${t_cmd##*[![:space:]]}"}"
+                    if [[ -n "${t_cmd}" && "${t_slot}" -ge 1 && "${t_slot}" -le 9 ]]; then
+                        tool_cmds["${t_slot}"]="${t_cmd}"
+                        # Resolve @template from cache (no yq fork)
+                        if [[ "${t_cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
+                            local tmpl="${BASH_REMATCH[1]}"
+                            if [[ -n "${_SESH_TEMPLATES[${tmpl}]:-}" ]]; then
+                                : # resolved via templates cache at display time
+                            elif [[ "${tmpl}" == "shell" ]]; then
+                                : # shell resolved at display time
+                            fi
+                        else
+                            : # inline command, no resolution
+                        fi
+                    fi
+                fi
+            done < "${tools_file}"
+        fi
+
         clear
         gum style --border rounded --padding "0 1" \
             --border-foreground 212 --bold "${CFG_TOOL_WINDOW_PREFIX} Tools — ${session_name}"
 
         local slot
-        for slot in $(seq 1 9); do
-            local tool_data
-            if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
-                local rest="${tool_data#*:::}"
-                local cmd="${rest%%:::*}"
+        for slot in {1..9}; do
+            if [[ -n "${tool_cmds[${slot}]:-}" ]]; then
+                local cmd="${tool_cmds[${slot}]}"
                 if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                     local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
                     printf '  @%d  %s (→ %s)\n' "${slot}" "${cmd}" "${expanded}"
@@ -1181,15 +1304,13 @@ ui_edit_tools() {
 
         case "${action}" in
             "Set tool")
-                # Build rich slot list (same info as main display) with cursor on earliest empty
-                local choices=()
+                # Build rich slot list using cached data (no get_tool calls)
+                local -a choices=()
                 local default_choice=""
                 local s
-                for s in $(seq 1 9); do
-                    local tool_data
-                    if tool_data=$(get_tool "${session_name}" "${s}" 2>/dev/null); then
-                        local rest="${tool_data#*:::}"
-                        local cmd="${rest%%:::*}"
+                for s in {1..9}; do
+                    if [[ -n "${tool_cmds[${s}]:-}" ]]; then
+                        local cmd="${tool_cmds[${s}]}"
                         if [[ "${cmd}" =~ ^@([a-zA-Z0-9_-]+)$ ]]; then
                             local expanded="${templates[${BASH_REMATCH[1]}]:-?}"
                             choices+=("${s}: ${cmd} (→ ${expanded})")
@@ -1199,7 +1320,7 @@ ui_edit_tools() {
                     else
                         choices+=("${s}: (empty)")
                     fi
-                    if [[ -z "${tool_data:-}" && -z "${default_choice}" ]]; then
+                    if [[ -z "${tool_cmds[${s}]:-}" && -z "${default_choice}" ]]; then
                         default_choice="${s}: (empty)"
                     fi
                 done
@@ -1230,11 +1351,7 @@ ui_edit_tools() {
                         new_cmd="@${picked}"
                         ;;
                     "Enter command manually")
-                        local current_cmd=""
-                        if tool_data=$(get_tool "${session_name}" "${slot_choice}" 2>/dev/null); then
-                            local rest="${tool_data#*:::}"
-                            current_cmd="${rest%%:::*}"
-                        fi
+                        local current_cmd="${tool_cmds[${slot_choice}]:-}"
                         new_cmd=$(gum input \
                             --header "Command for slot @${slot_choice}" \
                             --placeholder "e.g. nvim . or cargo watch -x run" \
@@ -1258,10 +1375,9 @@ ui_edit_tools() {
                 ;;
             "Clear tool")
                 local -a filled=()
-                for slot in $(seq 1 9); do
-                    if tool_data=$(get_tool "${session_name}" "${slot}" 2>/dev/null); then
-                        local rest="${tool_data#*:::}"
-                        filled+=("@${slot}: ${rest%%:::*}")
+                for slot in {1..9}; do
+                    if [[ -n "${tool_cmds[${slot}]:-}" ]]; then
+                        filled+=("@${slot}: ${tool_cmds[${slot}]}")
                     fi
                 done
                 if [[ ${#filled[@]} -eq 0 ]]; then
