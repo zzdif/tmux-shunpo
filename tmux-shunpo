@@ -1007,6 +1007,8 @@ navigate_to_tool() {
     else
         [[ "${window_exists}" == true ]] && tmux kill-window -t ":${window_index}" 2>/dev/null || true
 
+        tmux new-window -t ":${window_index}" -n "${CFG_TOOL_WINDOW_PREFIX}${name}" -c "${session_path}"
+
         # Poll for shell readiness instead of fixed sleep.
         # Most shells start in <50ms; polling catches them faster than sleeping.
         local _poll_attempt=0
