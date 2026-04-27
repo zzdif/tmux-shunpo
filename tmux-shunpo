@@ -891,6 +891,72 @@ ${i}: ${tools[${i}]}"
     atomic_write "${tools_file}" "${content}"
 }
 
+get_non_tool_windows() {
+    local line idx name
+    tmux list-windows -F "#{window_index} #{window_name}" 2>/dev/null | while IFS= read -r line; do
+        idx="${line%% *}"
+        name="${line#* }"
+        [[ "${idx}" -ge "${CFG_TOOL_WINDOW_BASE}" && "${idx}" -lt $((CFG_TOOL_WINDOW_BASE + 9)) ]] && continue
+        [[ "${name}" == "${CFG_TOOL_WINDOW_PREFIX}"* ]] && continue
+        printf '%s\n' "${line}"
+    done
+}
+
+assign_window_to_tool() {
+    local session_name="$1"
+    local slot="$2"
+    local src_index="$3"
+
+    validate_session_name "${session_name}" || return 1
+    validate_range "${slot}" 1 9 "Slot must be between 1-9"
+
+    local target_index=$((CFG_TOOL_WINDOW_BASE + slot - 1))
+
+    local original_name
+    original_name=$(tmux display-message -p -t ":${src_index}" '#{window_name}' 2>/dev/null) || {
+        notify "Window ${src_index} no longer exists" "error"
+        return 1
+    }
+
+    local new_name="${original_name}"
+    if [[ "${new_name}" != "${CFG_TOOL_WINDOW_PREFIX}"* ]]; then
+        new_name="${CFG_TOOL_WINDOW_PREFIX}${new_name}"
+    fi
+
+    if [[ "${src_index}" -ne "${target_index}" ]]; then
+        local target_exists=false
+        if tmux list-windows -F "#{window_index}" 2>/dev/null | grep -qx "${target_index}"; then
+            target_exists=true
+        fi
+
+        if [[ "${target_exists}" == true ]]; then
+            tmux swap-window -s ":${src_index}" -t ":${target_index}" 2>/dev/null || {
+                notify "Failed to swap window to tool slot" "error"
+                return 1
+            }
+            local displaced_slot=$((target_index - CFG_TOOL_WINDOW_BASE + 1))
+            if [[ "${displaced_slot}" -ge 1 && "${displaced_slot}" -le 9 ]]; then
+                local displaced_name
+                displaced_name=$(tmux display-message -p -t ":${src_index}" '#{window_name}' 2>/dev/null) || true
+                if [[ "${displaced_name}" == "${CFG_TOOL_WINDOW_PREFIX}"* ]]; then
+                    local stripped_name="${displaced_name#"${CFG_TOOL_WINDOW_PREFIX}"}"
+                    tmux rename-window -t ":${src_index}" "${stripped_name}" 2>/dev/null || true
+                fi
+                tool_remove "${session_name}" "${displaced_slot}" 2>/dev/null || true
+            fi
+        else
+            tmux move-window -s ":${src_index}" -t ":${target_index}" 2>/dev/null || {
+                notify "Failed to move window to tool slot" "error"
+                return 1
+            }
+        fi
+    fi
+
+    tmux rename-window -t ":${target_index}" "${new_name}" 2>/dev/null || true
+    tmux select-window -t ":${target_index}" 2>/dev/null || true
+    tool_set "${session_name}" "${slot}" "@shell"
+}
+
 generate_window_name() {
     local command="$1"
     local custom_name="${2:-}"
@@ -1330,14 +1396,43 @@ ui_edit_tools() {
                 slot_choice=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select slot" --selected "${default_choice}") || continue
                 slot_choice="${slot_choice%%:*}"
 
+                if [[ -n "${tool_cmds[${slot_choice}]:-}" ]]; then
+                    if ! gum confirm "Slot @${slot_choice} already has '${tool_cmds[${slot_choice}]}'. Overwrite?"; then
+                        continue
+                    fi
+                fi
+
                 local method
                 method=$(gum choose --header "Source" \
+                    "Pick from existing window" \
                     "Pick from sesh window templates" \
                     "Enter command manually" \
                     "Shell (default shell)") || continue
 
                 local new_cmd=""
                 case "${method}" in
+                    "Pick from existing window")
+                        local window_list
+                        window_list=$(get_non_tool_windows)
+                        if [[ -z "${window_list}" ]]; then
+                            gum style --foreground 208 "No regular windows available"
+                            sleep 1
+                            continue
+                        fi
+                        local -a window_choices=()
+                        local wline
+                        while IFS= read -r wline; do
+                            [[ -z "${wline}" ]] && continue
+                            local widx="${wline%% *}"
+                            local wname="${wline#* }"
+                            window_choices+=("${widx}: ${wname}")
+                        done <<< "${window_list}"
+                        local picked
+                        picked=$(printf '%s\n' "${window_choices[@]}" | gum choose --header "Select window") || continue
+                        local picked_index="${picked%%:*}"
+                        assign_window_to_tool "${session_name}" "${slot_choice}" "${picked_index}"
+                        continue
+                        ;;
                     "Pick from sesh window templates")
                         if [[ ${#templates[@]} -eq 0 ]]; then
                             gum style --foreground 208 \

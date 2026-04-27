@@ -298,3 +298,145 @@ TOML
     assert_success
     assert_output "cargo:::cargo test:::cargo test"
 }
+
+# =============================================================================
+# Pick existing window → tool slot
+# =============================================================================
+
+@test "get_non_tool_windows excludes tool range and prefixed names" {
+    cat > "${MOCK_BIN}/tmux" <<MOCK
+#!/usr/bin/env bash
+case "\$1" in
+    list-windows)
+        printf '0 zsh\n1 nvim\n88 %seditor\n89 shell\n90 %stests\n' "${CFG_TOOL_WINDOW_PREFIX}" "${CFG_TOOL_WINDOW_PREFIX}"
+        ;;
+    *) exit 0 ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/tmux"
+
+    run get_non_tool_windows
+    assert_success
+    assert_line "0 zsh"
+    assert_line "1 nvim"
+    refute_line --partial "88"
+    refute_line --partial "90"
+}
+
+@test "assign_window_to_tool moves window when target empty" {
+    cat > "${MOCK_BIN}/tmux" <<MOCK
+#!/usr/bin/env bash
+echo "tmux \$*" >> "${TEST_TEMP_DIR}/tmux_calls.log"
+case "\$1" in
+    display-message)
+        if [[ "\$*" == *":5"* && "\$*" == *window_name* ]]; then
+            echo "mywin"
+        fi
+        ;;
+    list-windows)
+        if [[ "\$*" == *window_index* ]]; then
+            printf '0\n1\n5\n'
+        fi
+        ;;
+    move-window|rename-window|select-window) exit 0 ;;
+    *) exit 0 ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/tmux"
+
+    run assign_window_to_tool "test-session" 3 5
+    assert_success
+    assert_file_exist "${DATA_DIR}/tools/test-session"
+    run grep "3: @shell" "${DATA_DIR}/tools/test-session"
+    assert_success
+
+    run grep "move-window -s :5 -t :90" "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_success
+    run grep "rename-window -t :90 ${CFG_TOOL_WINDOW_PREFIX}mywin" "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_success
+}
+
+@test "assign_window_to_tool swaps and strips prefix from displaced tool" {
+    cat > "${MOCK_BIN}/tmux" <<MOCK
+#!/usr/bin/env bash
+echo "tmux \$*" >> "${TEST_TEMP_DIR}/tmux_calls.log"
+case "\$1" in
+    display-message)
+        if [[ "\$*" == *":5"* && "\$*" == *window_name* ]]; then
+            if [[ ! -f "${TEST_TEMP_DIR}/swapped" ]]; then
+                echo "mywin"
+            else
+                echo "${CFG_TOOL_WINDOW_PREFIX}oldtool"
+            fi
+        elif [[ "\$*" == *":90"* && "\$*" == *window_name* ]]; then
+            echo "${CFG_TOOL_WINDOW_PREFIX}oldtool"
+        fi
+        ;;
+    list-windows)
+        if [[ "\$*" == *window_index* ]]; then
+            printf '0\n1\n5\n90\n'
+        fi
+        ;;
+    swap-window)
+        touch "${TEST_TEMP_DIR}/swapped"
+        exit 0
+        ;;
+    rename-window|select-window) exit 0 ;;
+    *) exit 0 ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/tmux"
+
+    tool_set "test-session" 3 "@editor"
+
+    run assign_window_to_tool "test-session" 3 5
+    assert_success
+
+    run get_tool "test-session" 3
+    assert_output --partial "@shell"
+
+    run grep "swap-window -s :5 -t :90" "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_success
+    run grep "rename-window -t :5 oldtool" "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_success
+}
+
+@test "assign_window_to_tool fails if source window vanished" {
+    cat > "${MOCK_BIN}/tmux" <<MOCK
+#!/usr/bin/env bash
+case "\$1" in
+    display-message) exit 1 ;;
+    *) exit 0 ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/tmux"
+
+    run assign_window_to_tool "test-session" 2 5
+    assert_failure
+    assert_output --partial "no longer exists"
+}
+
+@test "assign_window_to_tool renames in place when src equals target" {
+    cat > "${MOCK_BIN}/tmux" <<MOCK
+#!/usr/bin/env bash
+echo "tmux \$*" >> "${TEST_TEMP_DIR}/tmux_calls.log"
+case "\$1" in
+    display-message)
+        if [[ "\$*" == *":90"* && "\$*" == *window_name* ]]; then
+            echo "mywin"
+        fi
+        ;;
+    list-windows) printf '90\n' ;;
+    rename-window|select-window) exit 0 ;;
+    *) exit 0 ;;
+esac
+MOCK
+    chmod +x "${MOCK_BIN}/tmux"
+
+    run assign_window_to_tool "test-session" 3 90
+    assert_success
+    run grep "rename-window -t :90 ${CFG_TOOL_WINDOW_PREFIX}mywin" "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_success
+    run grep -E 'move-window|swap-window' "${TEST_TEMP_DIR}/tmux_calls.log"
+    assert_failure
+}
