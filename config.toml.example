@@ -1,0 +1,80 @@
+# tmux-shunpo — Configuration
+
+# Tool window base index. Slot N → window (base + N - 1).
+# Default: 88 → tools use windows 88-96
+tool_window_base = 88
+
+# Shell init delay (seconds) — wait for prompt themes like Starship to load
+# before sending the tool command.
+shell_init_delay = 0.2
+
+# Maximum length of the initial command-derived tool descriptor. Existing live
+# names and manually authored descriptors are never truncated.
+window_name_max_length = 20
+
+# Status-bar label prefixes. Tool labels use the discovered physical binding
+# (for example @u); normal labels use the live tmux index (for example #2).
+# Prefixes must be non-empty and distinct, with no internal whitespace or
+# control characters. Surrounding whitespace is ignored with a warning.
+tool_window_prefix = "@"
+normal_window_prefix = "#"
+
+# New sessions are not filled automatically. First tool access asks whether to
+# load sesh.toml defaults, load slots from a preset, or start empty.
+
+# UI Settings for tmux popups
+[ui]
+popup_width = "80%"
+popup_height = "26"
+# Minimum absolute sizes (columns x rows) to ensure content fits on small screens
+# Popups will use max(percentage_of_terminal, minimum_size)
+popup_min_width = 80
+popup_min_height = 26
+
+# Border style for the popup window. Options: single, rounded, double, heavy, simple, padded, none
+# Default: rounded
+popup_border_lines = "rounded"
+
+# TMUX style format string for the popup border (e.g. "fg=blue", "fg=default")
+# Default: "fg=default" (inherits your tmux border style theme)
+popup_border_style = "fg=default"
+
+# TMUX style format string for the popup window body (e.g. "bg=default,fg=default")
+# Default: "bg=default,fg=default"
+popup_style = "bg=default,fg=default"
+
+# Enable Nerd Fonts for list icons and custom cursors (default: false)
+use_nerd_fonts = false
+
+
+# Tool presets for --bootstrap [name]
+[presets]
+# web = ["@editor", "npm run dev", "tail -f logs/dev.log"]
+# ops = ["@htop", "ssh admin@prod", "@logs"]
+
+# Guardrails — a convenience to catch typos/accidental pastes, NOT a security
+# boundary. Commands run in your own shell regardless. The prompt only fires when
+# you SET a command in the interactive tool editor, or apply a preset that
+# contains one. It asks once, at set time — never on Alt-@n at run time. Commands
+# defined in `[presets]` or your sesh.toml run as-is.
+#
+# Entries are command NAMES (single words), matched per word. A name also matches
+# its `.`/`-`/`_` variants — so "mkfs" catches "mkfs.ext4" and "newfs" catches
+# "newfs_apfs". Multi-word phrases like "git push --force" do NOT work; use the
+# command name ("git") instead.
+[guardrails]
+# Ask "⚠ this looks destructive — save it anyway?" for catastrophic commands.
+# Built-in list (cross-platform union):
+#   Linux : rm dd shred mkfs fdisk parted mkswap wipefs
+#   macOS : diskutil newfs asr srm
+#   power : shutdown reboot poweroff halt
+# (default: true; set false to disable the prompt entirely)
+confirm_destructive = true
+
+# Add command names to confirm, on top of the built-ins (one word each).
+# also_confirm = ["curl", "kubectl", "terraform"]
+
+# Opt out of built-ins you don't want to be asked about. For example, on macOS
+# the read-only "diskutil list" also triggers the prompt — skip it if that's noisy:
+# skip_confirm = ["diskutil"]
+
